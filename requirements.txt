@@ -1,0 +1,13 @@
+# Núcleo — Fases 1, 2, 3 e 5.
+# Versões fixadas e verificadas para Python 3.14 no Windows (ver ARQUITETURA §16, R6).
+# NÃO adicionar aqui: torch, sentence-transformers, transformers, model2vec, numpy.
+# `nvidia-ml-py` é a wheel oficial da NVIDIA e publica o módulo `pynvml`.
+# Essas dependências vivem em requirements-semantic.txt (RNF-10).
+# O pacote `pynvml` do PyPI é só um shim que depende dela e emite FutureWarning.
+watchdog==6.0.0
+psutil==7.2.2
+nvidia-ml-py==13.610.43
+pdfplumber==0.11.10
+python-docx==1.2.0
+rich==15.0.0
+plyer==2.1.0

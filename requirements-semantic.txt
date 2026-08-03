@@ -1,0 +1,7 @@
+# Extra OPCIONAL da Fase 4 (busca semântica).
+# Uma instalação limpa NÃO precisa disto: a busca léxica (FTS5) funciona sem nada.
+#   pip install -r requirements-semantic.txt
+#
+# model2vec usa embeddings estáticos destilados: carrega em ~100 ms e NÃO arrasta torch.
+model2vec==0.7.0
+numpy==2.5.1
