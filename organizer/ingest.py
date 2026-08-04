@@ -14,7 +14,20 @@ import traceback
 from dataclasses import replace
 from pathlib import Path
 
-from organizer import classify, config, db, guard, log, move, paths, queue, rules, stability
+from organizer import (
+    classify,
+    config,
+    db,
+    embeddings,
+    guard,
+    log,
+    move,
+    notify,
+    paths,
+    queue,
+    rules,
+    stability,
+)
 from organizer.queue import Motivo  # reexport: `ingest.Motivo` é o nome canônico (RNF-15)
 
 __all__ = ["Motivo", "processar", "EXIT_OK", "EXIT_ADIADO", "EXIT_ERRO"]
@@ -48,6 +61,26 @@ def deve_ignorar(caminho: Path, cfg) -> str | None:
 # --------------------------------------------------------------------------- #
 
 
+def _embedding(cfg, decisao, destino) -> tuple[bytes | None, str | None, int | None]:
+    """Vetor do arquivo, ou `(None, None, None)` sem o extra semântico (RF-68).
+
+    O backend é resolvido aqui, dentro do processo filho efêmero: o watcher
+    nunca importa `embeddings` (RNF-03).
+    """
+    try:
+        backend = embeddings.get_backend(cfg)
+        if backend is None:
+            return None, None, None
+        texto = embeddings.texto_para_indexar(
+            destino.name, decisao.origem.name, decisao.tipo, decisao.subtipo, decisao.texto_amostra
+        )
+        vetor = backend.encode([texto])[0]
+        return embeddings.para_blob(vetor), backend.nome, int(backend.dim)
+    except Exception as exc:
+        _logger.warning("falha ao gerar embedding de %s: %s", destino.name, exc)
+        return None, None, None
+
+
 def _indexar(conn, cfg, decisao, resultado) -> None:
     destino = resultado.destino
     try:
@@ -55,6 +88,7 @@ def _indexar(conn, cfg, decisao, resultado) -> None:
         sha = paths.sha256_arquivo(destino)
     except OSError:  # pragma: no cover - destino sumiu logo após o move
         tamanho, sha = None, None
+    vetor, modelo, dimensao = _embedding(cfg, decisao, destino)
     db.inserir_arquivo(
         conn,
         nome_orig=decisao.origem.name,
@@ -72,6 +106,9 @@ def _indexar(conn, cfg, decisao, resultado) -> None:
         motivo=resultado.motivo,
         duplicado_de=resultado.duplicado_de,
         texto_amostra=decisao.texto_amostra,
+        embedding=vetor,
+        embedding_model=modelo,
+        embedding_dim=dimensao,
         movido_em=db.ts(),
     )
 
@@ -186,6 +223,25 @@ def _processar(conn, cfg, origem: Path, motivo_origem, intervalo_cpu: float) -> 
         return EXIT_OK
 
     _indexar(conn, cfg, decisao, resultado)
+    if resultado.status == move.STATUS_AGUARDANDO:
+        # MODE=interactive: o plano fica em `operacoes(aguardando_aprovacao)` e
+        # espera o `inbox.py`. Nada vai para o destino final sem aprovação (RF-74).
+        queue.concluir(conn, origem)
+        notify.notificar(
+            "Arquivo aguardando aprovação",
+            f"{decisao.origem.name} -> {decisao.categoria} (confiança {decisao.confianca:.2f})",
+        )
+        log.logar_decisao(
+            _logger,
+            "aguardando",
+            origem,
+            dest=resultado.destino,
+            conf=decisao.confianca,
+            via=decisao.via,
+            motivo=Motivo.AGUARDANDO_APROVACAO.value,
+        )
+        return EXIT_OK
+
     move.concluir(conn, resultado.op_id)
     queue.concluir(conn, origem)
 

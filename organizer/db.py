@@ -366,6 +366,25 @@ def buscar_fts(conn: sqlite3.Connection, consulta: str, limite: int = 20) -> lis
     ).fetchall()
 
 
+def linhas_com_embedding(
+    conn: sqlite3.Connection, embedding_model: str, limite: int = 50000
+) -> list[sqlite3.Row]:
+    """Linhas cujo vetor veio do modelo informado — nunca mistura modelos (RF-69)."""
+    return conn.execute(
+        "SELECT * FROM arquivos WHERE embedding IS NOT NULL AND embedding_model = ? "
+        "ORDER BY id LIMIT ?",
+        (embedding_model, limite),
+    ).fetchall()
+
+
+def contar_com_embedding(conn: sqlite3.Connection) -> int:
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) AS n FROM arquivos WHERE embedding IS NOT NULL"
+        ).fetchone()["n"]
+    )
+
+
 def contar_fts(conn: sqlite3.Connection) -> int:
     return int(conn.execute("SELECT COUNT(*) AS n FROM arquivos_fts").fetchone()["n"])
 
@@ -515,6 +534,13 @@ def journal_por_estado(conn: sqlite3.Connection, estados: Sequence[str]) -> list
     marcadores = ", ".join("?" for _ in estados)
     return conn.execute(
         f"SELECT * FROM operacoes WHERE estado IN ({marcadores}) ORDER BY id", tuple(estados)
+    ).fetchall()
+
+
+def operacoes_aguardando(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Planos de move parados esperando aprovação manual (RF-75, RF-79)."""
+    return conn.execute(
+        "SELECT * FROM operacoes WHERE estado = 'aguardando_aprovacao' ORDER BY id"
     ).fetchall()
 
 

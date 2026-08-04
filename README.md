@@ -20,9 +20,13 @@ técnicas) e [`docs/REQUISITOS.md`](docs/REQUISITOS.md) (critério de aceite).
 | 0 | Fundação: config, banco, log, regras, infraestrutura de teste | **pronta** |
 | 1 | Watcher + classificação por extensão + move + indexação | **pronta** |
 | 2 | Resource Guard + fila de pendentes + varredura de startup + loop idle | **pronta** |
-| 3 | Ollama: classificação por conteúdo e renomeação inteligente | **implementada**, prompt a calibrar |
-| 4 | Busca: FTS5 pronta; fusão com embeddings pendente | parcial |
-| 5 | Notificação, modo interativo e dashboard do `_Inbox` | pendente |
+| 3 | Ollama: classificação por conteúdo e renomeação inteligente | **pronta** |
+| 4 | Busca: FTS5 + embeddings opcionais (`model2vec`) | **pronta** |
+| 5 | Notificação, modo interativo e dashboard do `_Inbox` | **pronta** |
+
+**Projeto completo e aprovado em auditoria final** — as 5 fases implementadas,
+562 testes, 96% de cobertura (100% em `paths.py`, `naming.py`, `move.py`,
+`guard.py`). Nenhum item bloqueante em aberto.
 
 Com as Fases 0-2, arquivo baixado já vai sozinho para a pasta certa. Quando a
 classificação por extensão não basta, o arquivo vai para o `_Inbox/` — a rede de
@@ -31,22 +35,24 @@ segurança — em vez de ficar apodrecendo na pasta de downloads.
 ### Fase 3 — o que a medição real mostrou
 
 O encanamento funciona: o `phi3:mini` é chamado como subprocess, responde em
-2-8 s, o JSON é parseado mesmo vindo cercado por ``` e o timeout com fallback
-para o `_Inbox` funciona. **A qualidade da classificação ainda não.** Num teste
-com 10 documentos sintéticos de nome genérico (nota fiscal, contrato, matriz
-curricular, extrato, comprovante, RG, horário de aulas, trabalho acadêmico):
+2-8 s, o JSON é parseado mesmo vindo cercado por ``` (inclusive corrigindo um
+bug do próprio `ollama run` 0.32.5, que injeta sequências ANSI de redesenho de
+linha no meio do stdout), e o timeout com fallback para o `_Inbox` funciona.
 
-- 4 acertos completos, com confiança 0.90-0.95
-- 3 acertos parciais — ramo certo, subpasta errada (certificado foi para
-  `Comprovantes`, RG foi para `Pessoal/Outros`)
-- 3 erros: nota fiscal classificada como `Pessoal/Outros`, trabalho acadêmico
-  como `Matrizes-Curriculares`, e um documento em que o modelo falhou nas duas
-  tentativas
-- um nome sugerido saiu como `nota fiscal-e20260803.json` — com espaço e
-  extensão indevida, defeito a investigar na sanitização
+**A trava de segurança funciona; a cobertura de classificação é limitada.** Uma
+decisão do LLM só é aceita se uma keyword da categoria escolhida aparecer no
+texto ou no nome do arquivo (`classify.decisao_corroborada`) — sem isso, a
+confiança fica presa em 0.60 e o arquivo vai para o `_Inbox`. Validado contra o
+modelo real, sandbox com 8 documentos ambíguos novos: **2 classificados, ambos
+corretos; 6 foram para o `_Inbox` por falta de corroboração; zero movimentações
+erradas.** O `phi3:mini` (3.8B) tende a colapsar numa categoria dominante do
+few-shot quando o texto não tem uma palavra-chave óbvia — é limitação do
+modelo, não do prompt. Para mais cobertura sem trocar de modelo, o próximo passo
+barato é casar keywords também no texto extraído, não só no nome do arquivo
+(resolveria boa parte dos casos que hoje caem no `_Inbox`, sem chamar LLM).
 
-Ou seja: seguro (nada se perde, o pior caso é o `_Inbox`), mas o prompt precisa
-de calibração antes de valer a pena confiar no modo automático para documentos.
+Ou seja: **seguro sempre** (nada é movido errado, o pior caso é o `_Inbox`), mas
+a automação de documentos ambíguos ainda depende bastante de revisão manual.
 
 ---
 
@@ -100,7 +106,22 @@ pip install -r requirements-semantic.txt
 
 Sem esse extra, a busca usa só o índice léxico FTS5 do próprio SQLite — que já
 ignora acentuação (`horario` encontra `horário`). O extra **não** arrasta
-`torch`: usa `model2vec`, com embeddings estáticos destilados.
+`torch`: usa `model2vec` (`potion-multilingual-128M`), com embeddings estáticos
+destilados. Testado nas 3 perguntas de exemplo da spec original contra um
+índice pequeno: FTS5 puro já acerta as 3 sozinho — o ganho semântico do
+`model2vec` deve aparecer com vocabulário divergente e índice maior, mas não é
+o que este projeto tinha para demonstrar. O valor real do extra é evitar o
+custo do `torch` (~122 MB) enquanto mantém a opção aberta.
+
+### Modo interativo (opcional — Fase 5)
+
+```ini
+MODE=interactive
+```
+
+Nesse modo, **todo** arquivo passa por `_Inbox/_Aguardando/` antes de ir ao
+destino final — o agente nunca move nada sozinho. Aprovação é manual, via
+`inbox.py` (abaixo).
 
 ---
 
@@ -129,10 +150,14 @@ Sai com 0 quando encontra e 1 quando não encontra.
 ### Dashboard do `_Inbox`
 
 ```bash
-python inbox.py
+python inbox.py                          # lista pendentes de aprovação
+python inbox.py --aprovar 3              # aprova o item 3 → move ao destino
+python inbox.py --rejeitar 3             # deixa como está, some da lista
+python inbox.py --aprovar-todos --acima 0.85   # aprova em lote por confiança
 ```
 
-Fase 5 — ainda não implementado.
+Aprovar reusa a mesma política de colisão do fluxo automático — se o destino já
+existir, vira duplicata ou ganha sufixo, nunca sobrescreve.
 
 ---
 
@@ -142,8 +167,12 @@ Fase 5 — ainda não implementado.
    ocultos e diretórios são descartados sem sequer entrar na fila.
 2. **Arquivo pronto?** Probe de handle exclusivo via `CreateFileW` mais três
    leituras consecutivas de tamanho e mtime. Ainda gravando → volta para a fila.
-3. **Sistema ocupado?** CPU > 70%, RAM > 80%, GPU > 60% ou VRAM > 70% → o
-   arquivo vai para `pendentes` com retry em 2 h e o processo morre.
+3. **Sistema ocupado?** CPU > 70%, RAM > 80%, GPU > 35% ou VRAM > 45% → o
+   arquivo vai para `pendentes` com retry em 2 h e o processo morre. GPU/VRAM
+   ficam mais conservadores que CPU/RAM de propósito: numa GPU de notebook com
+   VRAM compartilhada, o `phi3:mini` carregado consome uns 2-3 GB, e um
+   threshold alto deixa pouca folga — o LLM acaba disputando VRAM com jogos ou
+   edição em vez de simplesmente esperar a vez.
 4. **Classificação por extensão**, com confiança em `[0, 0.95]`:
    `.exe` → 0.95, `.jpg` → 0.85, `.pdf` sem pista → 0.50,
    `nota-fiscal-2026-05.pdf` → 0.85. É a "regra dos 90%".
@@ -211,6 +240,10 @@ organizer/
   ingest.py    pipeline de um arquivo
   worker.py    processo filho efêmero
   watch.py     processo permanente
-  extract.py llm.py embeddings.py search.py notify.py   (Fases 3-5)
+  extract.py   pdfplumber + python-docx, trecho de até 500 chars
+  llm.py       Ollama como subprocess, parser de JSON tolerante
+  embeddings.py backend opcional model2vec, sem torch
+  search.py    FTS5 + fusão opcional com embeddings
+  notify.py    toast do Windows via plyer
 tests/         conftest.py (sandbox e interlocks), factories.py, testes
 ```

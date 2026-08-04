@@ -49,6 +49,7 @@ class Motivo(str, Enum):
     LLM_INDISPONIVEL = "llm_indisponivel"
     LLM_TIMEOUT = "llm_timeout"
     LLM_PARSE_ERROR = "llm_parse_error"
+    LLM_SEM_CORROBORACAO = "llm_sem_corroboracao"
     PATH_MUITO_LONGO = "path_muito_longo"
     COLISAO_IRRESOLVIVEL = "colisao_irresolvivel"
     DUPLICADO = "duplicado"

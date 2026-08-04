@@ -78,10 +78,29 @@ class ResultadoMove:
 # --------------------------------------------------------------------------- #
 
 
-def pasta_destino(cfg, decisao) -> Path:
-    """`_Inbox` quando a decisão é de quarentena; a categoria caso contrário."""
+def exige_aprovacao(cfg, ignorar: bool = False) -> bool:
+    """Em `MODE=interactive`, **todo** arquivo espera aprovação (RF-74).
+
+    Não depende de `decisao.para_inbox`: condicionar a aprovação à baixa
+    confiança deixaria passar direto justamente a maioria dos arquivos — a
+    "regra dos 90%" —, que é exatamente o que o modo interativo existe para
+    revisar nos primeiros dias de uso.
+
+    `ignorar=True` existe para **um** chamador: o move disparado por
+    `inbox.aprovar()`. A aprovação já foi dada ali; exigi-la de novo mandaria o
+    arquivo de volta para `_Aguardando`, que é onde ele já está — e a política
+    de colisão o classificaria como duplicata de si mesmo, enterrando em
+    `_Duplicados` justamente o arquivo que o usuário aprovou (RF-76).
+    """
+    return cfg.mode == "interactive" and not ignorar
+
+
+def pasta_destino(cfg, decisao, ignorar_aprovacao: bool = False) -> Path:
+    """`_Aguardando` no modo interativo; `_Inbox` na quarentena; categoria no resto."""
+    if exige_aprovacao(cfg, ignorar_aprovacao):
+        return cfg.aguardando_dir
     if decisao.para_inbox:
-        return cfg.aguardando_dir if cfg.mode == "interactive" else cfg.inbox_dir
+        return cfg.inbox_dir
     return cfg.target_root / Path(decisao.categoria)
 
 
@@ -95,12 +114,13 @@ def _nome_duplicado(destino: Path, cfg) -> Path:
         n += 1
 
 
-def resolver_destino(cfg, decisao) -> Plano:
+def resolver_destino(cfg, decisao, ignorar_aprovacao: bool = False) -> Plano:
     """Aplica, nesta ordem, limite de caminho, duplicata e sufixo `-N` (RF-22)."""
-    bruto = pasta_destino(cfg, decisao) / decisao.nome_final
-    status = STATUS_INBOX if decisao.para_inbox else STATUS_ORGANIZADO
-    if decisao.para_inbox and cfg.mode == "interactive":
+    bruto = pasta_destino(cfg, decisao, ignorar_aprovacao) / decisao.nome_final
+    if exige_aprovacao(cfg, ignorar_aprovacao):
         status = STATUS_AGUARDANDO
+    else:
+        status = STATUS_INBOX if decisao.para_inbox else STATUS_ORGANIZADO
 
     ajustado = paths.ensure_max_path(bruto)
     if ajustado is None:
@@ -214,13 +234,19 @@ def _mover_entre_volumes(conn: db.Conexao, op_id: int, origem: Path, alvo: Path)
     os.unlink(str(origem))
 
 
-def executar(conn: db.Conexao, cfg, decisao) -> ResultadoMove:
-    """Move o arquivo seguindo o journal write-ahead (ARQUITETURA §12)."""
+def executar(
+    conn: db.Conexao, cfg, decisao, ignorar_aprovacao: bool = False
+) -> ResultadoMove:
+    """Move o arquivo seguindo o journal write-ahead (ARQUITETURA §12).
+
+    `ignorar_aprovacao=True` é exclusivo de `inbox.aprovar()`, que está
+    executando o plano que o usuário acabou de aprovar — ver `exige_aprovacao`.
+    """
     origem = Path(decisao.origem)
     if not origem.exists():
         return ResultadoMove(False, None, Motivo.SUMIU.value, STATUS_INBOX)
 
-    plano = resolver_destino(cfg, decisao)
+    plano = resolver_destino(cfg, decisao, ignorar_aprovacao)
     if not plano.viavel:
         return ResultadoMove(False, None, plano.motivo, STATUS_INBOX)
 
@@ -257,8 +283,7 @@ def executar(conn: db.Conexao, cfg, decisao) -> ResultadoMove:
             dry_run=True,
         )
 
-    if decisao.para_inbox and cfg.mode == "interactive":
-        db.journal_estado(conn, op_id, ESTADO_AGUARDANDO)
+    aguardando_aprovacao = exige_aprovacao(cfg, ignorar_aprovacao)
 
     try:
         alvo = reservar(conn, op_id, plano)
@@ -278,7 +303,9 @@ def executar(conn: db.Conexao, cfg, decisao) -> ResultadoMove:
         db.journal_estado(conn, op_id, ESTADO_FALHOU, str(exc))
         raise
 
-    db.journal_estado(conn, op_id, ESTADO_MOVIDO)
+    # em MODE=interactive a operação para aqui, esperando o `inbox.py --aprovar`.
+    # O plano fica no banco e por isso sobrevive a reboot (RF-74, RF-79).
+    db.journal_estado(conn, op_id, ESTADO_AGUARDANDO if aguardando_aprovacao else ESTADO_MOVIDO)
     db.reserva_remover(conn, op_id)
     return ResultadoMove(True, alvo, plano.motivo, plano.status, op_id, plano.duplicado_de)
 

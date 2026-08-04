@@ -55,11 +55,17 @@ def test_processo_encerra(cfg, alvo, ollama_falso):
 
 
 def test_nenhum_servidor_e_mantido_vivo():
-    """RF-51: `llm.py` não sobe `ollama serve` nem guarda um Popen persistente."""
-    fonte = (RAIZ_PROJETO / "organizer" / "llm.py").read_text(encoding="utf-8")
-    assert "subprocess.run(" in fonte
-    assert "serve" not in fonte
-    assert "Popen" not in fonte
+    """RF-51: `llm.py` não sobe `ollama serve` nem guarda um Popen persistente.
+
+    A checagem é sobre o **código**: docstrings podem citar `Popen` ao explicar
+    por que ele não é usado.
+    """
+    from test_isolation import linhas_efetivas
+
+    codigo = "\n".join(t for _, t in linhas_efetivas(RAIZ_PROJETO / "organizer" / "llm.py"))
+    assert "subprocess.run(" in codigo
+    assert "serve" not in codigo
+    assert "Popen" not in codigo
 
 
 def test_prompt_por_stdin(cfg, alvo, ollama_falso):
@@ -312,6 +318,58 @@ def test_validar_descarta_tudo_e_nao_conserta():
 def test_confianca_invalida(bruta, esperada):
     """RF-62: não numérica ou fora de `[0,1]` vira 0.5."""
     assert llm.normalizar_confianca(bruta) == pytest.approx(esperada)
+
+
+@pytest.mark.parametrize(
+    "chave,valor",
+    [
+        ("confiança", 0.82),
+        ("confidence", 0.82),
+        ("Confianca", 0.82),
+    ],
+)
+def test_chave_acentuada_ou_em_ingles_e_aceita(chave, valor):
+    """Achado da auditoria: o phi3:mini devolve `"confiança"` de vez em quando.
+
+    Antes, a leitura crua achava `None` e caía em silêncio para 0.5, jogando
+    fora um número perfeitamente bom.
+    """
+    resposta = llm.validar({"categoria": rules.CAT_EXTRATOS, chave: valor})
+    assert resposta is not None
+    assert resposta.confianca == pytest.approx(valor)
+
+
+def test_nome_e_motivo_tambem_aceitam_sinonimos():
+    resposta = llm.validar(
+        {
+            "categoria": rules.CAT_EXTRATOS,
+            "nome sugerido": "extrato-2026-04",
+            "razão": "extrato bancario",
+            "confianca": 0.7,
+        }
+    )
+    assert resposta.nome_sugerido == "extrato-2026-04"
+    assert resposta.motivo == "extrato bancario"
+
+
+def test_confianca_ausente_gera_warning(caplog):
+    """Cair no default de 0.5 deixou de ser silencioso."""
+    with caplog.at_level(logging.WARNING, logger="organizer.llm"):
+        resposta = llm.validar({"categoria": rules.CAT_EXTRATOS})
+    assert resposta.confianca == llm.CONFIANCA_PADRAO
+    assert "sem confianca utilizável" in caplog.text
+
+
+def test_confianca_boa_nao_gera_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="organizer.llm"):
+        llm.validar({"categoria": rules.CAT_EXTRATOS, "confianca": 0.9})
+    assert "sem confianca" not in caplog.text
+
+
+def test_normalizar_chaves_preserva_o_canonico():
+    """Se as duas grafias vierem, a canônica vence."""
+    normalizado = llm.normalizar_chaves({"confianca": 0.9, "confiança": 0.1})
+    assert normalizado["confianca"] == 0.9
 
 
 def test_confianca_invalida_ponta_a_ponta(cfg, alvo, ollama_falso):

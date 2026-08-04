@@ -46,6 +46,12 @@ EVID_KEYWORD = 0.20
 EVID_NOME = 0.20
 #: Mínimo de caracteres para o trecho extraído contar como evidência.
 MIN_CHARS_TEXTO = 200
+
+#: Teto imposto a uma decisão do LLM que o próprio texto não corrobora.
+#: Fica **abaixo** de qualquer `CONFIDENCE_MIN` razoável de propósito: o efeito é
+#: mandar o arquivo para o `_Inbox` em vez de movê-lo com confiança para a pasta
+#: errada (ver `decisao_corroborada`).
+TETO_LLM_SEM_CORROBORACAO = 0.60
 #: Bônus/ônus quando `LLM_SAMPLES=2`.
 AJUSTE_AMOSTRAS_CONCORDAM = 0.10
 AJUSTE_AMOSTRAS_DISCORDAM = -0.20
@@ -243,6 +249,27 @@ def evidencia(
     return min(1.0, total)
 
 
+def decisao_corroborada(categoria: str, texto: str | None, nome_original: str) -> bool:
+    """O texto (ou o nome) confirma a categoria que o LLM escolheu?
+
+    Calibração medida com o phi3:mini real (10 documentos sintéticos, 4 rodadas):
+    o modelo acerta 4 a 5 de 10 e — pior — erra com confiança 0.85-0.90, o que
+    move o arquivo para a pasta errada. O sinal que separa acerto de erro não é
+    a confiança auto-reportada, é a **corroboração léxica**: quando ele acerta,
+    a palavra que nomeia a categoria está no trecho ("NOTA FISCAL", "EXTRATO",
+    "HORARIO DE AULAS"); quando erra, não está.
+
+    Categorias sem keywords declaradas (`Outros`, `Fotos`, `Videos`, `Musica`)
+    não têm como ser corroboradas e ficam de fora da checagem.
+    """
+    termos = rules.keywords_da_categoria(categoria)
+    if not termos:
+        return True
+    return tem_keyword_no_texto(texto, categoria) or tem_keyword_no_texto(
+        nome_original, categoria
+    )
+
+
 def confianca_llm(conf_bruta: float, evid: float, amostras_concordam: bool | None = None) -> float:
     """`clamp(0.5*conf_llm + 0.5*evidencia, 0.0, 0.90)` (RF-60, RF-61)."""
     valor = 0.5 * float(conf_bruta) + 0.5 * float(evid)
@@ -327,6 +354,10 @@ def classificar(caminho: Path | str, cfg, texto: str | None = None, conn=None) -
             stem_bruto = paths.sanitize_stem(resposta.nome_sugerido or "")
             evid = evidencia(canonica is not None, texto, stem_bruto, origem.name, canonica or "")
             nova_conf = confianca_llm(resposta.confianca, evid)
+            corroborada = canonica is not None and decisao_corroborada(canonica, texto, origem.name)
+            if canonica is not None and not corroborada:
+                nova_conf = min(nova_conf, TETO_LLM_SEM_CORROBORACAO)
+
             if canonica is None:
                 motivo = Motivo.LLM_PARSE_ERROR.value
             elif nova_conf > confianca:
@@ -334,7 +365,7 @@ def classificar(caminho: Path | str, cfg, texto: str | None = None, conn=None) -
                 tipo, subtipo = rules.tipo_subtipo_da_categoria(canonica)
                 confianca = nova_conf
                 via = VIA_LLM
-                motivo = Motivo.OK.value
+                motivo = Motivo.OK.value if corroborada else Motivo.LLM_SEM_CORROBORACAO.value
                 if len(stem_bruto) >= 3:
                     stem_sugerido = stem_bruto
 

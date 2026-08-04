@@ -360,6 +360,21 @@ def test_extensao_sugerida_pelo_llm_e_removida(sugerido, esperado):
     assert classify.remover_extensao_sugerida(sugerido) == esperado
 
 
+def test_nome_sugerido_com_espaco_e_extensao_indevida(sandbox):
+    """RF-57/RF-58: caso real medido na auditoria da Fase 3.
+
+    O phi3:mini devolveu `nota fiscal-e20260803.json` para um PDF: espaço no
+    meio e extensão inventada. Nada disso pode chegar ao disco.
+    """
+    origem = sandbox.downloads / "document.pdf"
+    final = classify.nome_final_para(origem, "nota fiscal-e20260803.json")
+
+    assert final == "nota-fiscal-e20260803.pdf"
+    assert " " not in final
+    assert ".json" not in final
+    assert final.endswith(".pdf")
+
+
 def test_nome_final_nunca_duplica_a_extensao(sandbox):
     origem = sandbox.downloads / "documento (2).docx"
     final = classify.nome_final_para(origem, "matriz_curricular_unifesp.docx")
@@ -435,6 +450,59 @@ def test_categoria_invalida_do_llm_ponta_a_ponta(sandbox, ollama_falso):
     assert decisao.para_inbox is True
     assert decisao.categoria == rules.CAT_OUTROS
     assert decisao.motivo == Motivo.LLM_PARSE_ERROR.value
+
+
+def test_decisao_corroborada():
+    """Calibração da Fase 3: o texto confirma a categoria escolhida pelo LLM?"""
+    assert classify.decisao_corroborada(
+        rules.CAT_NOTAS_FISCAIS, "NOTA FISCAL DE SERVICOS numero 4521", "document.pdf"
+    )
+    assert not classify.decisao_corroborada(
+        rules.CAT_CERTIFICADOS, "CARTEIRA DE IDENTIDADE RG 12345", "20260214.pdf"
+    )
+    # o nome do arquivo também serve de corroboração
+    assert classify.decisao_corroborada(rules.CAT_CONTRATOS, None, "contrato-estagio.pdf")
+    # categorias sem keywords não têm como ser corroboradas — ficam de fora
+    assert classify.decisao_corroborada(rules.CAT_OUTROS, "qualquer coisa", "x.pdf")
+    assert classify.decisao_corroborada(rules.CAT_FOTOS, None, "x.jpg")
+
+
+def test_llm_sem_corroboracao_cai_no_inbox(sandbox, ollama_falso):
+    """Mitigação medida: LLM confiante mas sem apoio no texto NÃO move o arquivo.
+
+    O dublê responde `Matrizes-Curriculares` com confiança 0.88, mas o trecho
+    fala de identidade civil. Antes desta trava o arquivo ia parar, com 0.90 de
+    confiança, na pasta errada.
+    """
+    from organizer import config
+
+    config.get_config.cache_clear()
+    cfg = config.get_config()
+    alvo = sandbox.downloads / "document.pdf"
+    alvo.write_bytes(factories.pdf_minimo("carteira de identidade rg cpf " * 20))
+
+    decisao = classify.classificar(alvo, cfg)
+
+    assert decisao.confianca <= classify.TETO_LLM_SEM_CORROBORACAO
+    assert decisao.para_inbox is True
+    assert decisao.motivo == Motivo.LLM_SEM_CORROBORACAO.value
+    assert classify.TETO_LLM_SEM_CORROBORACAO < sandbox.cfg.confidence_min
+
+
+def test_llm_corroborado_move_normalmente(sandbox, ollama_falso):
+    """O outro lado: com apoio no texto, a decisão do LLM vale."""
+    from organizer import config
+
+    config.get_config.cache_clear()
+    cfg = config.get_config()
+    alvo = sandbox.downloads / "document.pdf"
+    alvo.write_bytes(factories.pdf_minimo("matriz curricular do curso " * 20))
+
+    decisao = classify.classificar(alvo, cfg)
+
+    assert decisao.para_inbox is False
+    assert decisao.motivo == Motivo.OK.value
+    assert decisao.confianca == pytest.approx(classify.TETO_LLM)
 
 
 def test_normalizar_para_keyword():

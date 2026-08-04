@@ -146,8 +146,42 @@ def disponivel(cfg, conn=None) -> bool:
 
 _INSTRUCAO = (
     "Responda SOMENTE com um objeto JSON, sem markdown, sem explicacao, "
-    "exatamente com as chaves: categoria, nome_sugerido, confianca, motivo."
+    "exatamente com as chaves: categoria, nome_sugerido, confianca, motivo. "
+    "O campo motivo tem no maximo 10 palavras, numa unica linha."
 )
+
+#: Few-shot. Cobre justamente as quatro categorias que o phi3:mini errava sem
+#: exemplo (medido na auditoria: Notas-Fiscais, Certificados, RG-CPF, Trabalhos).
+#: São exemplos inventados; nenhum arquivo real do usuário foi usado.
+EXEMPLOS = """Exemplos de resposta correta:
+
+trecho: "NOTA FISCAL DE SERVICOS ELETRONICA NFS-e numero 004521 Prestador ..."
+{"categoria": "Documentos/Financeiro/Notas-Fiscais", "nome_sugerido": "nfse-004521-horizonte-2026-05", "confianca": 0.9, "motivo": "cabecalho declara NFS-e"}
+
+trecho: "CERTIFICADO Certificamos que Fulano concluiu o curso de ... 120 horas"
+{"categoria": "Documentos/Academico/Certificados", "nome_sugerido": "certificado-curso-machine-learning-2026", "confianca": 0.9, "motivo": "certifica conclusao de curso"}
+
+trecho: "CARTEIRA DE IDENTIDADE Registro Geral 12.345.678-9 CPF 123.456.789-00"
+{"categoria": "Documentos/Pessoal/Documentos-RG-CPF", "nome_sugerido": "rg-cpf-fulano", "confianca": 0.9, "motivo": "documento de identidade civil"}
+
+trecho: "TRABALHO DE CONCLUSAO DE CURSO Titulo: ... Resumo: ... Orientador: ..."
+{"categoria": "Documentos/Academico/UNIFESP/Trabalhos", "nome_sugerido": "tcc-deteccao-anomalias-series-temporais", "confianca": 0.9, "motivo": "monografia com orientador"}
+
+trecho: "MATRIZ CURRICULAR Grade do curso. Primeiro semestre: Calculo I, Algoritmos I ..."
+{"categoria": "Documentos/Academico/UNIFESP/Matrizes-Curriculares", "nome_sugerido": "matriz-curricular-engenharia-computacao", "confianca": 0.9, "motivo": "lista disciplinas por semestre"}
+
+trecho: "COMPROVANTE DE MATRICULA Aluno: ... RA ... Situacao: MATRICULADO 2026/1"
+{"categoria": "Documentos/Academico/UNIFESP/Comprovantes", "nome_sugerido": "comprovante-matricula-2026-1", "confianca": 0.9, "motivo": "comprova vinculo com a faculdade"}
+
+trecho: "HORARIO DE AULAS Segunda 08:00 Calculo III sala B12; Terca 08:00 Redes ..."
+{"categoria": "Documentos/Academico/UNIFESP/Horarios", "nome_sugerido": "horario-aulas-2026-1", "confianca": 0.9, "motivo": "dias horas e salas das aulas"}
+
+trecho: "EXTRATO DE CONTA CORRENTE Banco ... Saldo anterior ... Lancamentos ..."
+{"categoria": "Documentos/Financeiro/Extratos", "nome_sugerido": "extrato-conta-2026-04", "confianca": 0.9, "motivo": "extrato bancario com lancamentos"}
+
+Os exemplos acima sao apenas ilustrativos: NAO copie a categoria do ultimo
+exemplo. Leia o trecho do arquivo em questao e escolha pelo titulo dele.
+Agora classifique o arquivo acima."""
 
 
 def montar_prompt(origem: Path, texto: str | None, max_chars: int = 500) -> str:
@@ -185,7 +219,8 @@ def montar_prompt(origem: Path, texto: str | None, max_chars: int = 500) -> str:
         "Contratos. Uma lista de disciplinas por semestre e Matrizes-Curriculares; "
         "uma lista de dias e horas de aula e Horarios.\n"
         "4. Copie a categoria exatamente como esta na lista, sem a glosa. "
-        f"Se o trecho nao permitir decidir, use {rules.CAT_OUTROS} com confianca baixa.\n"
+        f"Se o trecho nao permitir decidir, use {rules.CAT_OUTROS} com confianca baixa.\n\n"
+        f"{EXEMPLOS}\n"
         "Sugira tambem um nome curto e descritivo, em minusculas, sem acento, "
         "palavras separadas por hifen, SEM extensao e SEM ponto.\n"
         "confianca e um numero entre 0 e 1.\n\n"
@@ -367,6 +402,31 @@ def normalizar_confianca(bruta) -> float:
     return valor
 
 
+#: Grafias que o modelo usa para cada chave. O prompt pede sem acento, mas o
+#: phi3:mini às vezes devolve `"confiança"` / `"categoría"` — e a leitura crua
+#: caía em silêncio no default de 0.5, jogando fora informação boa.
+_SINONIMOS_DE_CHAVE = {
+    "categoria": ("categoria", "categoría", "category"),
+    "nome_sugerido": ("nome_sugerido", "nome sugerido", "nome", "suggested_name", "name"),
+    "confianca": ("confianca", "confiança", "confidence", "confidencia"),
+    "motivo": ("motivo", "razao", "razão", "reason", "justificativa"),
+}
+
+
+def normalizar_chaves(dados: dict) -> dict:
+    """Mapeia as grafias aceitas para os nomes canônicos do contrato."""
+    minusculas = {str(k).strip().lower(): v for k, v in dados.items()}
+    normalizado = dict(dados)
+    for canonica, grafias in _SINONIMOS_DE_CHAVE.items():
+        if canonica in dados:
+            continue
+        for grafia in grafias:
+            if grafia in minusculas:
+                normalizado[canonica] = minusculas[grafia]
+                break
+    return normalizado
+
+
 def validar(dados: dict | None) -> RespostaLLM | None:
     """Converte o dicionário cru em `RespostaLLM`, ou descarta tudo.
 
@@ -375,15 +435,35 @@ def validar(dados: dict | None) -> RespostaLLM | None:
     """
     if not isinstance(dados, dict):
         return None
+    dados = normalizar_chaves(dados)
     canonica = rules.categoria_valida(dados.get("categoria"))
     if canonica is None:
         return None
+
+    bruta = dados.get("confianca")
+    confianca = normalizar_confianca(bruta)
+    if bruta is None or confianca != _como_float(bruta):
+        _logger.warning(
+            "resposta do LLM sem confianca utilizável (%r) — usando %.2f. "
+            "Chaves recebidas: %s",
+            bruta,
+            confianca,
+            sorted(str(k) for k in dados),
+        )
+
     return RespostaLLM(
         categoria=canonica,
         nome_sugerido=str(dados.get("nome_sugerido") or ""),
-        confianca=normalizar_confianca(dados.get("confianca")),
+        confianca=confianca,
         motivo=str(dados.get("motivo") or ""),
     )
+
+
+def _como_float(bruta):
+    try:
+        return float(bruta)
+    except (TypeError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -395,22 +475,50 @@ def _matar_orfaos(cfg, desde: float) -> int:
     """Reforço do kill: derruba processos do Ollama nascidos durante esta chamada.
 
     `subprocess.run` já mata o filho direto ao estourar o timeout, mas não
-    alcança netos. Filtramos por executável **e** por horário de criação para
-    nunca tocar num Ollama que já estava rodando antes de nós (o servidor do
-    aplicativo de desktop, por exemplo).
+    alcança netos — e no Windows um neto órfão não é reparentado, então não dá
+    para achá-lo por `children()` depois que o intermediário morre.
+
+    Dois critérios, sempre combinados com o horário de criação (só processos
+    nascidos **durante esta chamada**), para nunca tocar num Ollama que já
+    estava de pé — o servidor do aplicativo de desktop, por exemplo:
+
+    1. o nome do executável é o de `OLLAMA_BIN` (o caso normal);
+    2. a linha de comando cita ao mesmo tempo o binário configurado e o modelo
+       — é o que pega um *wrapper* (`.cmd`, `.bat`, um interpretador) entre nós
+       e o Ollama, que o critério 1 sozinho não enxerga.
+
+    Limitação conhecida: um wrapper que não repasse nem o nome do binário nem o
+    do modelo na linha de comando continua invisível. Não há como identificá-lo
+    sem capturar o PID, o que exigiria trocar `subprocess.run` por `Popen`.
     """
-    alvo = Path(shutil.which(cfg.ollama_bin) or cfg.ollama_bin).name.lower()
+    caminho = Path(shutil.which(cfg.ollama_bin) or cfg.ollama_bin)
+    alvo = caminho.name.lower()
+    marca = caminho.stem.lower()
+    modelo = (cfg.ollama_model or "").lower()
     mortos = 0
     try:
         import psutil
     except ImportError:  # pragma: no cover - psutil é dependência do núcleo
         return 0
-    for processo in psutil.process_iter(["name", "create_time"]):
+
+    def _e_nosso(info) -> bool:
+        if (info.get("name") or "").lower() == alvo:
+            return True
+        linha = " ".join(info.get("cmdline") or []).lower()
+        return bool(marca and modelo and marca in linha and modelo in linha)
+
+    for processo in psutil.process_iter(["name", "create_time", "cmdline"]):
         try:
-            if (processo.info["name"] or "").lower() != alvo:
-                continue
             if (processo.info["create_time"] or 0) < desde:
                 continue
+            if not _e_nosso(processo.info):
+                continue
+            for filho in processo.children(recursive=True):
+                try:
+                    filho.kill()
+                    mortos += 1
+                except Exception:
+                    continue
             processo.kill()
             mortos += 1
         except Exception:
