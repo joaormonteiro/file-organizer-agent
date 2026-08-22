@@ -5,8 +5,7 @@ novo, move para uma árvore organizada e indexa tudo num SQLite pesquisável.
 
 **Princípio-mestre: zero RAM em idle.** Exatamente um processo fica vivo (o
 watcher, ~5 MB, 0% de CPU). Tudo que é caro — `psutil`, NVML, `pdfplumber`,
-`python-docx`, o Ollama — vive só dentro de processos filhos efêmeros que
-nascem, agem e morrem.
+`python-docx`, a chamada ao Gemini — só existe pelo tempo de um evento.
 
 Documentos de referência: [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) (decisões
 técnicas) e [`docs/REQUISITOS.md`](docs/REQUISITOS.md) (critério de aceite).
@@ -20,7 +19,7 @@ técnicas) e [`docs/REQUISITOS.md`](docs/REQUISITOS.md) (critério de aceite).
 | 0 | Fundação: config, banco, log, regras, infraestrutura de teste | **pronta** |
 | 1 | Watcher + classificação por extensão + move + indexação | **pronta** |
 | 2 | Resource Guard + fila de pendentes + varredura de startup + loop idle | **pronta** |
-| 3 | Ollama: classificação por conteúdo e renomeação inteligente | **pronta** |
+| 3 | Gemini: classificação por conteúdo e renomeação inteligente | **pronta** |
 | 4 | Busca: FTS5 + embeddings opcionais (`model2vec`) | **pronta** |
 | 5 | Notificação, modo interativo e dashboard do `_Inbox` | **pronta** |
 
@@ -32,27 +31,34 @@ Com as Fases 0-2, arquivo baixado já vai sozinho para a pasta certa. Quando a
 classificação por extensão não basta, o arquivo vai para o `_Inbox/` — a rede de
 segurança — em vez de ficar apodrecendo na pasta de downloads.
 
-### Fase 3 — o que a medição real mostrou
+### Fase 3 — Ollama → Gemini
 
-O encanamento funciona: o `phi3:mini` é chamado como subprocess, responde em
-2-8 s, o JSON é parseado mesmo vindo cercado por ``` (inclusive corrigindo um
-bug do próprio `ollama run` 0.32.5, que injeta sequências ANSI de redesenho de
-linha no meio do stdout), e o timeout com fallback para o `_Inbox` funciona.
+Até 08/2026 a Fase 3 rodava o `phi3:mini` (3.8B) local via `ollama run` como
+subprocess. Funcionava, mas a cobertura era baixa: o modelo tendia a colapsar
+numa categoria dominante do few-shot quando o texto não tinha uma palavra-chave
+óbvia — limitação do modelo, não do prompt. Numa validação com 8 documentos
+ambíguos reais, só 2 foram classificados (ambos corretos); os outros 6 caíram
+no `_Inbox` por falta de corroboração léxica (`classify.decisao_corroborada`).
 
-**A trava de segurança funciona; a cobertura de classificação é limitada.** Uma
+A fronteira com o LLM (`organizer/llm.py`) foi trocada para chamar a API do
+Gemini por HTTP (`urllib`, sem dependência nova) em vez de um binário local.
+Ganhos diretos da troca:
+
+- **`responseSchema` com `enum` fechado**: a API é instruída a só devolver uma
+  das categorias canônicas — a classe inteira de "categoria inventada" que
+  antes só era pega depois, na validação, agora é bem mais rara na origem.
+- Sem VRAM local disputada: os thresholds do Resource Guard voltaram ao valor
+  da spec original (`THRESHOLD_GPU=60`, `THRESHOLD_VRAM=70`) — o `phi3:mini`
+  carregado brigava por VRAM com jogos/edição numa GPU de notebook; a API não.
+- Sem instalação nem download de modelo: só uma `GEMINI_API_KEY` no `.env`.
+
+A trava de segurança (`decisao_corroborada`) continua ativa e sem mudanças: uma
 decisão do LLM só é aceita se uma keyword da categoria escolhida aparecer no
-texto ou no nome do arquivo (`classify.decisao_corroborada`) — sem isso, a
-confiança fica presa em 0.60 e o arquivo vai para o `_Inbox`. Validado contra o
-modelo real, sandbox com 8 documentos ambíguos novos: **2 classificados, ambos
-corretos; 6 foram para o `_Inbox` por falta de corroboração; zero movimentações
-erradas.** O `phi3:mini` (3.8B) tende a colapsar numa categoria dominante do
-few-shot quando o texto não tem uma palavra-chave óbvia — é limitação do
-modelo, não do prompt. Para mais cobertura sem trocar de modelo, o próximo passo
-barato é casar keywords também no texto extraído, não só no nome do arquivo
-(resolveria boa parte dos casos que hoje caem no `_Inbox`, sem chamar LLM).
-
-Ou seja: **seguro sempre** (nada é movido errado, o pior caso é o `_Inbox`), mas
-a automação de documentos ambíguos ainda depende bastante de revisão manual.
+texto ou no nome do arquivo — sem isso, a confiança fica presa em 0.60 e o
+arquivo vai para o `_Inbox`. **Seguro sempre** (nada é movido errado, o pior
+caso é o `_Inbox`); a expectativa é que a cobertura suba com um modelo maior e
+o `enum` fechado, mas isso ainda não foi validado contra tráfego real — vale
+observar os primeiros dias de uso antes de confiar de olhos fechados.
 
 ---
 
@@ -89,13 +95,17 @@ Não há default para `DOWNLOADS_DIR` nem para `TARGET_ROOT`: o agente **recusa
 iniciar** sem eles, e recusa também se as duas raízes se sobrepuserem. É o que
 impede o loop infinito de reorganizar a própria saída.
 
-### LLM local (opcional — Fase 3)
+### LLM (opcional — Fase 3)
 
-```bash
-ollama pull phi3:mini
+Gere uma chave gratuita em <https://aistudio.google.com/apikey> e defina no
+`.env`:
+
+```ini
+GEMINI_API_KEY=sua-chave-aqui
+GEMINI_MODEL=gemini-3.6-flash
 ```
 
-Sem o Ollama instalado, nada quebra: os arquivos ambíguos vão para o `_Inbox`
+Sem `GEMINI_API_KEY`, nada quebra: os arquivos ambíguos vão para o `_Inbox`
 com `motivo=llm_indisponivel` e todo o resto continua funcionando.
 
 ### Busca semântica (opcional — Fase 4)
@@ -203,7 +213,8 @@ venv\Scripts\python -m pytest
 venv\Scripts\python -m pytest --cov=organizer --cov-report=term-missing
 ```
 
-A suíte roda inteira sem Ollama, sem GPU e sem as dependências de embeddings.
+A suíte roda inteira sem rede, sem `GEMINI_API_KEY` real, sem GPU e sem as
+dependências de embeddings.
 
 Nenhum teste toca em arquivo real. Quatro barreiras independentes garantem isso:
 todo caminho vem da configuração; o sandbox vive no `tmp_path` do pytest; um
@@ -241,7 +252,7 @@ organizer/
   worker.py    processo filho efêmero
   watch.py     processo permanente
   extract.py   pdfplumber + python-docx, trecho de até 500 chars
-  llm.py       Ollama como subprocess, parser de JSON tolerante
+  llm.py       API do Gemini via HTTP, parser de JSON tolerante
   embeddings.py backend opcional model2vec, sem torch
   search.py    FTS5 + fusão opcional com embeddings
   notify.py    toast do Windows via plyer

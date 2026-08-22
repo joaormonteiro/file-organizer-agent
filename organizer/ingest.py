@@ -177,7 +177,7 @@ def _processar(conn, cfg, origem: Path, motivo_origem, intervalo_cpu: float) -> 
         log.logar_decisao(_logger, "adiado", origem, motivo=Motivo.OCUPADO.value)
         return EXIT_ADIADO
 
-    # ---- classificação (o ramo do LLM extrai o trecho e usa o cache em config_kv) ----
+    # ---- classificação (o ramo do LLM extrai o trecho e chama o Gemini) ----
     decisao = classify.classificar(origem, cfg, conn=conn)
 
     pendente = db.pendente_por_path(conn, str(origem))

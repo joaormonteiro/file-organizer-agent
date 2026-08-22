@@ -13,11 +13,14 @@ As quatro barreiras da ARQUITETURA §14, em profundidade:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -150,8 +153,8 @@ _ENV_PADRAO = {
     "STABILITY_INTERVAL": "0.01",
     "STABILITY_TIMEOUT": "2",
     "LLM_ENABLED": "1",
-    "OLLAMA_BIN": "ollama-inexistente-para-testes",
-    "OLLAMA_MODEL": "phi3:mini",
+    "GEMINI_API_KEY": "",
+    "GEMINI_MODEL": "gemini-3.6-flash",
     "LLM_TIMEOUT": "5",
     "LLM_SAMPLES": "1",
     "EMBEDDING_BACKEND": "none",
@@ -206,54 +209,139 @@ def conn(sandbox):
 
 
 # --------------------------------------------------------------------------- #
-# Ollama falso — nenhum teste depende do Ollama real (RNF-05)
+# Gemini falso — nenhum teste depende de rede ou de uma chave real (RNF-05)
 # --------------------------------------------------------------------------- #
+
+RESPOSTA_VALIDA_GEMINI = {
+    "categoria": "Documentos/Academico/UNIFESP/Matrizes-Curriculares",
+    "nome_sugerido": "matriz-curricular-engenharia-computacao-2026",
+    "confianca": 0.88,
+    "motivo": "texto cita grade curricular e UNIFESP",
+}
+
+
+def _envelope(texto: str) -> bytes:
+    """Empacota `texto` no formato real de resposta da API do Gemini."""
+    return json.dumps({"candidates": [{"content": {"parts": [{"text": texto}]}}]}).encode("utf-8")
+
+
+class _RespostaFalsa:
+    """Suficiente do protocolo de `http.client.HTTPResponse` usado por `llm.executar`."""
+
+    def __init__(self, corpo: bytes):
+        self._corpo = corpo
+
+    def read(self) -> bytes:
+        return self._corpo
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 @dataclass
-class OllamaFalso:
-    """Binário roteirizado que substitui o `ollama` nos testes."""
+class GeminiFalso:
+    """Dublê de `urllib.request.urlopen` roteirizado por modo, substitui a API real."""
 
-    binario: Path
-    log: Path
     monkeypatch: object
+    _modo: str = "json_puro"
+    _log: list = field(default_factory=list)
 
-    def modo(self, nome: str, **ambiente: str) -> None:
+    def modo(self, nome: str) -> None:
         """Escolhe o roteiro da próxima chamada."""
-        self.monkeypatch.setenv("FAKE_OLLAMA_MODO", nome)
-        for chave, valor in ambiente.items():
-            self.monkeypatch.setenv(chave, str(valor))
+        self._modo = nome
 
     @property
     def chamadas(self) -> list[dict]:
-        if not self.log.exists():
-            return []
-        return [
-            json.loads(linha)
-            for linha in self.log.read_text(encoding="utf-8").splitlines()
-            if linha.strip()
-        ]
+        return self._log
 
     def limpar(self) -> None:
-        if self.log.exists():
-            self.log.write_text("", encoding="utf-8")
+        self._log.clear()
+
+    def urlopen(self, requisicao, timeout=None):
+        prompt = json.loads(requisicao.data.decode("utf-8"))["contents"][0]["parts"][0]["text"]
+        self._log.append(
+            {
+                "prompt": prompt,
+                "url": requisicao.full_url,
+                "chave": requisicao.get_header("X-goog-api-key"),
+            }
+        )
+        modo = self._modo
+
+        if modo == "dorme":
+            raise TimeoutError("simulado")
+        if modo == "erro":
+            raise urllib.error.HTTPError(
+                requisicao.full_url, 500, "internal error", {}, io.BytesIO(b"erro simulado")
+            )
+        if modo == "chave_invalida":
+            raise urllib.error.HTTPError(
+                requisicao.full_url, 401, "unauthorized", {}, io.BytesIO(b"invalid api key")
+            )
+        if modo == "sem_rede":
+            raise urllib.error.URLError("getaddrinfo failed")
+        if modo == "bloqueio_safety":
+            return _RespostaFalsa(json.dumps({"candidates": []}).encode("utf-8"))
+        if modo == "json_puro":
+            return _RespostaFalsa(_envelope(json.dumps(RESPOSTA_VALIDA_GEMINI)))
+        if modo == "cerca_markdown":
+            return _RespostaFalsa(
+                _envelope(f"```json\n{json.dumps(RESPOSTA_VALIDA_GEMINI)}\n```")
+            )
+        if modo == "prosa_com_json":
+            return _RespostaFalsa(
+                _envelope(
+                    f"Claro! Analisei o documento e concluí o seguinte:\n"
+                    f"{json.dumps(RESPOSTA_VALIDA_GEMINI)}\nEspero ter ajudado."
+                )
+            )
+        if modo == "lixo":
+            return _RespostaFalsa(_envelope("Desculpe, não consegui identificar este arquivo."))
+        if modo == "lixo_depois_json":
+            # falha na primeira chamada, acerta na segunda: prova o retry (RF-55)
+            if len(self._log) == 1:
+                return _RespostaFalsa(_envelope("Hmm, deixa eu pensar melhor..."))
+            return _RespostaFalsa(_envelope(json.dumps(RESPOSTA_VALIDA_GEMINI)))
+        if modo == "categoria_invalida":
+            return _RespostaFalsa(
+                _envelope(
+                    json.dumps({**RESPOSTA_VALIDA_GEMINI, "categoria": "Documentos/Inventada/Nao-Existe"})
+                )
+            )
+        if modo == "confianca_invalida":
+            return _RespostaFalsa(
+                _envelope(json.dumps({**RESPOSTA_VALIDA_GEMINI, "confianca": "muito alta"}))
+            )
+        if modo == "confianca_fora_do_intervalo":
+            return _RespostaFalsa(
+                _envelope(json.dumps({**RESPOSTA_VALIDA_GEMINI, "confianca": 42}))
+            )
+        if modo == "nome_sujo":
+            return _RespostaFalsa(
+                _envelope(
+                    json.dumps(
+                        {
+                            **RESPOSTA_VALIDA_GEMINI,
+                            "nome_sugerido": 'matriz<>:"/\\|?*curricular 2026.docx',
+                        }
+                    )
+                )
+            )
+        raise AssertionError(f"modo desconhecido no GeminiFalso: {modo!r}")
 
 
 @pytest.fixture
-def ollama_falso(tmp_path, monkeypatch) -> OllamaFalso:
-    """Gera um `.cmd` que encaminha para `tests/fake_ollama.py` e aponta `OLLAMA_BIN`."""
-    script = Path(__file__).parent / "fake_ollama.py"
-    binario = tmp_path / "ollama-falso.cmd"
-    binario.write_text(
-        f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="utf-8"
-    )
-    log = tmp_path / "chamadas-ollama.jsonl"
-
-    monkeypatch.setenv("OLLAMA_BIN", str(binario))
-    monkeypatch.setenv("OLLAMA_MODEL", "phi3:mini")
-    monkeypatch.setenv("FAKE_OLLAMA_LOG", str(log))
-    monkeypatch.setenv("FAKE_OLLAMA_MODO", "json_puro")
+def gemini_falso(monkeypatch) -> GeminiFalso:
+    """Substitui `urllib.request.urlopen` por um dublê roteirizável e injeta uma chave fake."""
+    monkeypatch.setenv("GEMINI_API_KEY", "chave-de-teste-fake")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3.6-flash")
     config.get_config.cache_clear()
+
+    falso = GeminiFalso(monkeypatch)
+    monkeypatch.setattr(urllib.request, "urlopen", falso.urlopen)
 
     # o aviso de indisponibilidade é uma vez por processo; zera entre testes
     from organizer import llm
@@ -261,7 +349,7 @@ def ollama_falso(tmp_path, monkeypatch) -> OllamaFalso:
     monkeypatch.setattr(llm, "_avisou", False)
     monkeypatch.setattr(llm, "_motivo_da_falha", {})
 
-    return OllamaFalso(binario, log, monkeypatch)
+    return falso
 
 
 #: Módulo que testa o próprio guard e por isso precisa dos leitores reais.

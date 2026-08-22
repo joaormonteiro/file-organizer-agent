@@ -4,7 +4,7 @@ Três camadas (ARQUITETURA §13), cada uma degradando sozinha:
 
 - **T1 léxica** — `sqlite3` stdlib + FTS5: sempre ativa;
 - **T2 semântica** — `model2vec` (extra opcional), via `EMBEDDING_BACKEND`;
-- **T3 rerank** — `ollama` CLI, via `SEARCH_RERANK_LLM=1`.
+- **T3 rerank** — API do Gemini, via `SEARCH_RERANK_LLM=1`.
 
 Sem o extra de embeddings a busca continua respondendo por BM25 e `query.py`
 imprime uma dica de instalação — nenhum `ImportError` vaza (RF-63, RF-68).
@@ -163,7 +163,7 @@ def fundir(lexicos: list[Resultado], semanticos: list[Resultado]) -> list[Result
 
 
 def rerankear(resultados: list[Resultado], pergunta: str, cfg, conn=None) -> list[Resultado]:
-    """Pede ao Ollama qual candidato responde melhor. Falhou? Segue igual (RF-72)."""
+    """Pede ao Gemini qual candidato responde melhor. Falhou? Segue igual (RF-72)."""
     if not cfg.search_rerank_llm or len(resultados) < 2:
         return resultados
     from organizer import llm

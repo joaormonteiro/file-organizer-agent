@@ -294,7 +294,13 @@ no startup e a cada loop idle.
 
 ---
 
-## Fase 3 — Ollama: classificação por conteúdo e renomeação inteligente
+## Fase 3 — Gemini: classificação por conteúdo e renomeação inteligente
+
+> Trocado de Ollama local (`phi3:mini` via subprocess) para a API do Gemini
+> (HTTP) em 08/2026 — motivo: cobertura de classificação baixa em documentos
+> ambíguos. Ver ARQUITETURA §9. RF-51 a RF-59 abaixo foram adaptados; os
+> números foram mantidos para não quebrar as referências cruzadas do resto
+> deste documento.
 
 ### RF-47 [BLOQUEANTE]: O LLM só é acionado para documentos de texto
 (`.pdf .docx .doc .txt .md .rtf .odt`) que tenham nome genérico **ou** confiança de
@@ -504,9 +510,10 @@ watcher, execução da query e a instalação opcional do extra semântico.
 `python-docx==1.2.0`, `rich==15.0.0`, `plyer==2.1.0`.
 **V:** `pip install -r requirements.txt` numa venv de Python 3.14 sem erro de build.
 
-### RNF-19: Nenhum módulo de `organizer/` faz I/O de rede.
-Exceção única: o download do modelo de embeddings, e apenas no primeiro uso do extra
-opcional da Fase 4.
+### RNF-19: Nenhum módulo de `organizer/` faz I/O de rede, salvo duas exceções deliberadas.
+`embeddings.py` (download do modelo, só no primeiro uso do extra opcional da Fase 4) e
+`llm.py` (chamada à API do Gemini, Fase 3 — trocado de Ollama local em 08/2026).
+**V:** `pytest tests/test_isolation.py::test_sem_rede`.
 **V:** `pytest tests/test_isolation.py::test_sem_rede` — grep por `requests`, `urllib`,
 `httpx` e `socket` em `organizer/` fora de `embeddings.py`.
 

@@ -272,17 +272,17 @@ def test_fusao_promove_quem_aparece_nos_dois_rankings():
 
 
 def test_rerank_opcional(indice, sandbox):
-    """RF-72: desligado por padrão e pulado em silêncio sem Ollama."""
+    """RF-72: desligado por padrão e pulado em silêncio sem chave do Gemini."""
     resultados = search.buscar_lexico(indice, "matriz curricular")
     assert sandbox.cfg.search_rerank_llm is False
     assert search.rerankear(resultados, "x", sandbox.cfg) == resultados
 
     ligado = dataclasses.replace(sandbox.cfg, search_rerank_llm=True)
-    # `OLLAMA_BIN` do sandbox não existe: o rerank some sem levantar nada
+    # `GEMINI_API_KEY` do sandbox está vazia: o rerank some sem levantar nada
     assert search.rerankear(resultados, "x", ligado) == resultados
 
 
-def test_rerank_promove_o_escolhido(indice, sandbox, ollama_falso, monkeypatch):
+def test_rerank_promove_o_escolhido(indice, sandbox, gemini_falso, monkeypatch):
     from organizer import llm
 
     config.get_config.cache_clear()
@@ -297,7 +297,7 @@ def test_rerank_promove_o_escolhido(indice, sandbox, ollama_falso, monkeypatch):
     assert len(rerankeados) == len(resultados)
 
 
-def test_rerank_ignora_resposta_absurda(indice, sandbox, ollama_falso, monkeypatch):
+def test_rerank_ignora_resposta_absurda(indice, sandbox, gemini_falso, monkeypatch):
     from organizer import llm
 
     config.get_config.cache_clear()

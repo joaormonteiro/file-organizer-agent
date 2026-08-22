@@ -260,7 +260,7 @@ def test_nome_do_llm_e_sanitizado(sandbox):
 
 
 def test_llm_indisponivel_nao_quebra(sandbox, monkeypatch):
-    """RF-53: sem Ollama, o ambíguo cai no `_Inbox` com motivo específico."""
+    """RF-53: sem GEMINI_API_KEY, o ambíguo cai no `_Inbox` com motivo específico."""
     assert llm.disponivel(sandbox.cfg) is False
     alvo = sandbox.downloads / "document.pdf"
     alvo.write_bytes(b"%PDF-1.4")
@@ -301,15 +301,15 @@ def test_categoria_invalida_do_llm_e_descartada(sandbox, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Fase 3 ponta a ponta, com o Ollama falso
+# Fase 3 ponta a ponta, com o Gemini falso
 # --------------------------------------------------------------------------- #
 
 
-def test_extensao_preservada(sandbox, ollama_falso):
+def test_extensao_preservada(sandbox, gemini_falso):
     """RF-57: o fake sugere outra extensão e o destino mantém a original."""
     from organizer import config
 
-    ollama_falso.modo("nome_sujo")  # nome_sugerido termina em `.docx`
+    gemini_falso.modo("nome_sujo")  # nome_sugerido termina em `.docx`
     config.get_config.cache_clear()
     cfg = config.get_config()
     alvo = sandbox.downloads / "document.pdf"
@@ -322,11 +322,11 @@ def test_extensao_preservada(sandbox, ollama_falso):
     assert not decisao.nome_final.endswith(".docx")
 
 
-def test_nome_do_llm_e_sanitizado(sandbox, ollama_falso):
+def test_nome_do_llm_e_sanitizado(sandbox, gemini_falso):
     """RF-58: o nome sugerido passa por `paths.sanitize_stem` antes de qualquer uso."""
     from organizer import config, paths
 
-    ollama_falso.modo("nome_sujo")
+    gemini_falso.modo("nome_sujo")
     config.get_config.cache_clear()
     cfg = config.get_config()
     alvo = sandbox.downloads / "document.pdf"
@@ -382,7 +382,7 @@ def test_nome_final_nunca_duplica_a_extensao(sandbox):
     assert final.endswith(".docx")
 
 
-def test_ramo_do_llm_ponta_a_ponta(sandbox, ollama_falso):
+def test_ramo_do_llm_ponta_a_ponta(sandbox, gemini_falso):
     """RF-47 + RF-60: documento genérico vai ao LLM e volta classificado."""
     from organizer import config
 
@@ -401,11 +401,11 @@ def test_ramo_do_llm_ponta_a_ponta(sandbox, ollama_falso):
     assert decisao.texto_amostra and "matriz curricular" in decisao.texto_amostra
 
 
-def test_zip_generico_nao_aciona_o_llm(sandbox, ollama_falso):
+def test_zip_generico_nao_aciona_o_llm(sandbox, gemini_falso):
     """RF-47: `.zip` de nome genérico não vai ao LLM — não há texto a extrair."""
     from organizer import config
 
-    ollama_falso.limpar()
+    gemini_falso.limpar()
     config.get_config.cache_clear()
     cfg = config.get_config()
     alvo = sandbox.downloads / "download (3).zip"
@@ -416,10 +416,10 @@ def test_zip_generico_nao_aciona_o_llm(sandbox, ollama_falso):
     assert decisao.via != classify.VIA_LLM
     assert decisao.para_inbox is True
     assert decisao.motivo == Motivo.BAIXA_CONFIANCA.value
-    assert [c for c in ollama_falso.chamadas if c["argv"][:1] != ["list"]] == []
+    assert gemini_falso.chamadas == []
 
 
-def test_pdf_protegido_segue_por_nome_e_tamanho(sandbox, ollama_falso):
+def test_pdf_protegido_segue_por_nome_e_tamanho(sandbox, gemini_falso):
     """RF-49: sem texto, a classificação continua — só com menos evidência."""
     from organizer import config
 
@@ -435,11 +435,11 @@ def test_pdf_protegido_segue_por_nome_e_tamanho(sandbox, ollama_falso):
     assert decisao.confianca < classify.TETO_LLM
 
 
-def test_categoria_invalida_do_llm_ponta_a_ponta(sandbox, ollama_falso):
+def test_categoria_invalida_do_llm_ponta_a_ponta(sandbox, gemini_falso):
     """RF-56 ponta a ponta: resposta descartada manda o arquivo para o `_Inbox`."""
     from organizer import config
 
-    ollama_falso.modo("categoria_invalida")
+    gemini_falso.modo("categoria_invalida")
     config.get_config.cache_clear()
     cfg = config.get_config()
     alvo = sandbox.downloads / "document.pdf"
@@ -467,7 +467,7 @@ def test_decisao_corroborada():
     assert classify.decisao_corroborada(rules.CAT_FOTOS, None, "x.jpg")
 
 
-def test_llm_sem_corroboracao_cai_no_inbox(sandbox, ollama_falso):
+def test_llm_sem_corroboracao_cai_no_inbox(sandbox, gemini_falso):
     """Mitigação medida: LLM confiante mas sem apoio no texto NÃO move o arquivo.
 
     O dublê responde `Matrizes-Curriculares` com confiança 0.88, mas o trecho
@@ -489,7 +489,7 @@ def test_llm_sem_corroboracao_cai_no_inbox(sandbox, ollama_falso):
     assert classify.TETO_LLM_SEM_CORROBORACAO < sandbox.cfg.confidence_min
 
 
-def test_llm_corroborado_move_normalmente(sandbox, ollama_falso):
+def test_llm_corroborado_move_normalmente(sandbox, gemini_falso):
     """O outro lado: com apoio no texto, a decisão do LLM vale."""
     from organizer import config
 

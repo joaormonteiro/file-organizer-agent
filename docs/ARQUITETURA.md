@@ -11,7 +11,7 @@
 
 **Zero RAM em idle.** Exatamente um processo fica vivo permanentemente: o `watcher`.
 Ele só pode importar `watchdog`, `sqlite3` e stdlib. Tudo que é caro (psutil, pynvml,
-pdfplumber, python-docx, ollama, numpy, embeddings) vive **apenas** dentro de processos
+pdfplumber, python-docx, a chamada HTTP ao Gemini, numpy, embeddings) vive **apenas** dentro de processos
 filhos efêmeros que nascem, agem e morrem.
 
 Consequência arquitetural direta e não-negociável:
@@ -263,9 +263,9 @@ STABILITY_TIMEOUT=300
 
 # --- LLM ---
 LLM_ENABLED=1
-OLLAMA_BIN=ollama         # sobrescrito nos testes por um fake script
-OLLAMA_MODEL=phi3:mini
-LLM_TIMEOUT=90
+GEMINI_API_KEY=           # sobrescrito nos testes, chave falsa injetada pelo fixture
+GEMINI_MODEL=gemini-3.6-flash
+LLM_TIMEOUT=30
 LLM_SAMPLES=1
 
 # --- busca ---
@@ -439,27 +439,48 @@ LLM (não há texto a extrair) — vai para `_Inbox`.
 
 ---
 
-## 9. Contrato do Ollama
+## 9. Contrato do Gemini
+
+> Até 08/2026 esta seção descrevia o `phi3:mini` local via `ollama run` como
+> subprocess. Trocado por chamada HTTP à API do Gemini — motivo: cobertura de
+> classificação baixa (o modelo de 3.8B colapsava numa categoria dominante em
+> documentos ambíguos; ver §"Divergências" no README). O contrato de saída
+> (`RespostaLLM`), o parser em cascata e a validação semântica não mudaram.
 
 **Invocação.**
 ```python
-subprocess.run(
-  [OLLAMA_BIN, "run", OLLAMA_MODEL, "--format", "json"],
-  input=prompt, text=True, encoding="utf-8", errors="replace",
-  capture_output=True, timeout=LLM_TIMEOUT,
-  creationflags=CREATE_NO_WINDOW)
+urllib.request.Request(
+  f"{ENDPOINT_BASE}/{GEMINI_MODEL}:generateContent",
+  data=json.dumps({
+    "contents": [{"parts": [{"text": prompt}]}],
+    "generationConfig": {
+      "temperature": 0.1,
+      "responseMimeType": "application/json",
+      "responseSchema": {...},   # enum fechado em CATEGORIAS — ver abaixo
+    },
+  }).encode("utf-8"),
+  headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+  method="POST")
+urllib.request.urlopen(requisicao, timeout=LLM_TIMEOUT)
 ```
-Prompt sempre por **stdin**, nunca por argv: elimina limite de linha de comando e
-problemas de quoting no Windows. Se a versão instalada rejeitar `--format json`
-(stderr com `unknown flag`), reexecuta sem a flag e usa o parser tolerante — detectado
-uma vez e memorizado em `config_kv`.
+Prompt sempre no **corpo POST**, nunca na URL: nada de prompt ou dado do arquivo
+vazando em log de acesso. A chave também vai no header `x-goog-api-key`, não em
+query string, pelo mesmo motivo. Cada classificação é uma requisição HTTP síncrona
+— nenhuma conexão fica aberta por nossa conta entre chamadas.
+
+**`responseSchema` — restrição na origem.** `categoria` é declarada como `STRING`
+com `enum: list(rules.CATEGORIAS)`: a API é instruída a só devolver uma categoria
+válida, o que evita boa parte das "categorias inventadas" que o `phi3:mini`
+produzia. Não substitui a validação semântica abaixo — uma resposta bloqueada por
+safety ou cortada por limite de tokens ainda pode chegar fora do schema.
 
 **Disponibilidade (degradação graciosa — obrigatória).**
-`llm.disponivel()` = `shutil.which(OLLAMA_BIN) is not None` **e** `ollama list`
-(timeout 10 s) contendo `OLLAMA_MODEL`. Cacheado em `config_kv` com TTL de 1 h.
-Se indisponível: um `WARNING` com a instrução `ollama pull phi3:mini`, e **todo** o
-caminho LLM é pulado — ambíguos vão para `_Inbox` com `motivo='llm_indisponivel'`.
-Fases 1, 2, 4 e 5 continuam funcionando integralmente.
+`llm.disponivel()` = `LLM_ENABLED` **e** `GEMINI_API_KEY` não vazia. Diferente do
+Ollama, não há cache: checar a presença da chave é O(1), não uma chamada cara.
+Se indisponível: um `WARNING` com o link para gerar a chave em
+aistudio.google.com, e **todo** o caminho LLM é pulado — ambíguos vão para
+`_Inbox` com `motivo='llm_indisponivel'`. Fases 1, 2, 4 e 5 continuam
+funcionando integralmente.
 
 **Entrada do prompt** (PT-BR, ~600 tokens no pior caso):
 - lista fechada das categorias válidas (gerada de `rules.CATEGORIAS`, uma por linha);
@@ -467,18 +488,20 @@ Fases 1, 2, 4 e 5 continuam funcionando integralmente.
 - `trecho`: até 500 chars extraídos, com caracteres de controle removidos e espaços
   colapsados (se `extract` falhou: `"(sem texto extraido)"`);
 - instrução final: *"Responda SOMENTE com um objeto JSON, sem markdown, sem explicação,
-  exatamente com as chaves: categoria, nome_sugerido, confianca, motivo."*
+  exatamente com as chaves: categoria, nome_sugerido, confianca, motivo."* (redundante
+  com `responseSchema`, mantida como defesa em profundidade).
 
-**Saída esperada (contrato):**
+**Saída esperada (contrato — inalterado):**
 ```json
 {"categoria":"Documentos/Academico/UNIFESP/Matrizes-Curriculares",
  "nome_sugerido":"matriz-curricular-engenharia-computacao-2026",
  "confianca":0.88,
  "motivo":"texto cita grade curricular e UNIFESP"}
 ```
+Empacotado no envelope padrão da API: `candidates[0].content.parts[0].text`.
 
 **Parsing tolerante, em cascata:**
-1. `json.loads(stdout)`;
+1. `json.loads(texto_extraido)`;
 2. remove cercas de markdown e tenta de novo;
 3. extrai o primeiro objeto `{...}` balanceado por varredura de chaves e tenta;
 4. **1 retry** com prompt encurtado (trecho de 200 chars) + `"Sua ultima resposta foi
@@ -492,11 +515,13 @@ Fases 1, 2, 4 e 5 continuam funcionando integralmente.
 - A **extensão nunca vem do LLM** — é sempre a do arquivo original.
 - `confianca` não numérica ou fora de `[0,1]` → tratada como `0.5`.
 
-**Timeout e retry.** `LLM_TIMEOUT=90 s` (cobre o cold start de ~3 s do phi3:mini com
-folga em máquina ocupada). Em `TimeoutExpired`: `Popen.kill()` + `taskkill /T /F /PID`
-como reforço, `tentativas += 1`, `pendentes` com retry em 30 min. Após
-`MAX_TENTATIVAS_LLM=2`, vai para `_Inbox` com `motivo='llm_timeout'`. Teto de tempo de
-parede por arquivo: 3 × `LLM_TIMEOUT`.
+**Timeout e retry.** `LLM_TIMEOUT=30 s` (a API costuma responder em 1-3 s; 30 s é
+teto de segurança, não expectativa). Em timeout de rede (`TimeoutError`):
+`tentativas += 1`, `pendentes` com retry em 30 min. Após `MAX_TENTATIVAS_LLM=2`,
+vai para `_Inbox` com `motivo='llm_timeout'`. Erro HTTP (4xx/5xx, chave inválida,
+rede fora) vira `Indisponivel` e some direto para `motivo='llm_indisponivel'` sem
+gastar a segunda tentativa — diferente de timeout, não há razão para insistir numa
+chamada que a API já recusou.
 
 ---
 
@@ -647,7 +672,7 @@ inglês**, enquanto todas as perguntas de exemplo da spec são em português
 |---|---|---|
 | **T1 — léxica** | nenhuma (`sqlite3` stdlib; FTS5 confirmado na SQLite 3.50.4 local) | **sempre ativa** |
 | **T2 — semântica** | `model2vec` (wheel pura; deps: numpy, tokenizers, safetensors, joblib, jinja2, tqdm — **sem torch**) | opcional (`requirements-semantic.txt`) |
-| **T3 — rerank** | `ollama` CLI | opcional (`SEARCH_RERANK_LLM=1`) |
+| **T3 — rerank** | API do Gemini (HTTP) | opcional (`SEARCH_RERANK_LLM=1`) |
 
 `model2vec` usa embeddings **estáticos destilados**: carrega em ~100 ms, não importa
 torch, e `minishlab/potion-multilingual-128M` cobre português — resolvendo de quebra o
@@ -677,7 +702,7 @@ path UNINDEXED)` como *external content table* sobre `arquivos`, com
 pergunta -> normaliza -> T1 FTS5 (BM25, top 20)
                       -> T2 cosseno global (top 20)     [se backend disponivel]
                       -> RRF -> top 5
-                      -> T3 rerank ollama               [se SEARCH_RERANK_LLM=1]
+                      -> T3 rerank gemini               [se SEARCH_RERANK_LLM=1]
                       -> rich.Table: score | path | tipo/subtipo | indexado_em
                       -> exit 0 (achou) / 1 (vazio);  --json para uso programatico
 ```
@@ -726,10 +751,11 @@ estiverem dentro de `DOWNLOADS_DIR`. Adicionalmente, `FOA_ENV=test` (definido pe
 - Nomes: matriz de casos derivada da seção 8 (genéricos e não-genéricos), incluindo os
   casos reais observados como `holerite_..._2026-07 (1).pdf`.
 
-**Fake do Ollama.** `llm.py` executa `[OLLAMA_BIN, "run", ...]` com `OLLAMA_BIN` vindo da
-config. Nos testes, aponta para um script Python que imprime respostas roteirizadas
-(JSON válido; JSON dentro de cerca markdown; lixo; categoria fora do enum; e um caso que
-dorme para exercitar o timeout). **Nenhum teste depende de o Ollama estar instalado.**
+**Fake do Gemini.** `llm.py` chama `urllib.request.urlopen`. Nos testes, o fixture
+`gemini_falso` substitui essa função por um dublê roteirizado por modo (JSON válido;
+JSON dentro de cerca markdown; lixo; categoria fora do enum; erro HTTP; timeout
+simulado via `TimeoutError` imediato — sem sleep real). **Nenhum teste depende de
+rede ou de uma `GEMINI_API_KEY` real.**
 
 **Fake da GPU.** `guard.py` isola as chamadas NVML atrás de `_ler_gpu()`, que os testes
 monkeypatcham. Os testes de threshold são tabelas de valores para booleano esperado.
@@ -799,9 +825,8 @@ descarta o duplicado), depois `pendentes.path UNIQUE`, depois reserva `O_EXCL` n
 destino. Quatro pontos de serialização, nenhum dependendo de lock em memória de um
 único processo.
 
-**R5 — Ollama ausente** (verificado: `ollama` ainda não está no PATH desta máquina).
-Ver seção 9. Nenhuma fase além da 3 depende dele, e a Fase 3 degrada para `_Inbox`
-em vez de falhar.
+**R5 — `GEMINI_API_KEY` ausente ou API fora do ar.** Ver seção 9. Nenhuma fase além
+da 3 depende dela, e a Fase 3 degrada para `_Inbox` em vez de falhar.
 
 **R6 — Python 3.14.** Wheels confirmadas em 2026-08-02 para cp314/win_amd64:
 `psutil 7.2.2`, `numpy 2.5.1`, `onnxruntime 1.28.0`, `torch 2.13.0`. `watchdog 6.0.0`
@@ -884,7 +909,7 @@ CREATE TABLE IF NOT EXISTS em_processamento (
     iniciado_em TEXT DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS config_kv (        -- schema_version, cache do ollama, flags
+CREATE TABLE IF NOT EXISTS config_kv (        -- schema_version e outras flags de runtime
     chave     TEXT PRIMARY KEY,
     valor     TEXT,
     expira_em TEXT

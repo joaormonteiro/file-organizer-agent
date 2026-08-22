@@ -74,8 +74,8 @@ class Config:
     stability_timeout: float
     # LLM
     llm_enabled: bool
-    ollama_bin: str
-    ollama_model: str
+    gemini_api_key: str
+    gemini_model: str
     llm_timeout: float
     llm_samples: int
     # busca
@@ -205,8 +205,8 @@ def montar(arquivo: Path | None = None) -> Config:
         allow_cross_volume=_bool(d, "ALLOW_CROSS_VOLUME", False),
         threshold_cpu=_num(d, "THRESHOLD_CPU", 70.0, float),
         threshold_ram=_num(d, "THRESHOLD_RAM", 80.0, float),
-        threshold_gpu=_num(d, "THRESHOLD_GPU", 35.0, float),
-        threshold_vram=_num(d, "THRESHOLD_VRAM", 45.0, float),
+        threshold_gpu=_num(d, "THRESHOLD_GPU", 60.0, float),
+        threshold_vram=_num(d, "THRESHOLD_VRAM", 70.0, float),
         gpu_index=_num(d, "GPU_INDEX", 0, int),
         retry_busy_minutes=_num(d, "RETRY_BUSY_MINUTES", 120, int),
         retry_startup_minutes=_num(d, "RETRY_STARTUP_MINUTES", 30, int),
@@ -216,9 +216,9 @@ def montar(arquivo: Path | None = None) -> Config:
         stability_interval=_num(d, "STABILITY_INTERVAL", 1.0, float),
         stability_timeout=_num(d, "STABILITY_TIMEOUT", 300.0, float),
         llm_enabled=_bool(d, "LLM_ENABLED", True),
-        ollama_bin=_texto(d, "OLLAMA_BIN", "ollama"),
-        ollama_model=_texto(d, "OLLAMA_MODEL", "phi3:mini"),
-        llm_timeout=_num(d, "LLM_TIMEOUT", 90.0, float),
+        gemini_api_key=_texto(d, "GEMINI_API_KEY", ""),
+        gemini_model=_texto(d, "GEMINI_MODEL", "gemini-3.6-flash"),
+        llm_timeout=_num(d, "LLM_TIMEOUT", 30.0, float),
         llm_samples=_num(d, "LLM_SAMPLES", 1, int),
         embedding_backend=_texto(d, "EMBEDDING_BACKEND", "auto").lower(),
         embedding_model=_texto(d, "EMBEDDING_MODEL", "minishlab/potion-multilingual-128M"),

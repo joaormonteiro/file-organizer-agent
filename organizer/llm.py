@@ -1,44 +1,37 @@
-"""Fronteira com o Ollama: classificação por conteúdo (Fase 3).
+"""Fronteira com a API do Gemini: classificação por conteúdo (Fase 3).
 
-Contrato inteiro em ARQUITETURA §9. Pontos não-negociáveis, todos verificáveis:
+Contrato de saída inalterado desde a versão Ollama (ARQUITETURA §9). Pontos
+não-negociáveis, todos verificáveis:
 
-- o prompt vai por **stdin**, nunca por argv (RF-52) — elimina limite de linha de
-  comando e problema de quoting no Windows;
-- o processo é criado, aguardado e morre dentro de uma chamada de função; nenhum
-  servidor é mantido vivo pelo agente (RF-51);
-- categoria fora de `rules.CATEGORIAS` **descarta a resposta inteira** (RF-56);
+- cada classificação é **uma requisição HTTP síncrona**; nenhuma conexão fica
+  aberta por nossa conta entre chamadas (equivalente a RF-51);
+- categoria fora de `rules.CATEGORIAS` **descarta a resposta inteira** (RF-56)
+  — reforçado na origem via `responseSchema` com `enum`, mas validado de novo
+  aqui porque a API pode ignorar o schema em respostas bloqueadas por safety;
 - a extensão nunca vem do LLM (RF-57) — isto aqui só devolve `nome_sugerido`;
-- Ollama ausente degrada graciosamente, sem quebrar nada (RF-53).
+- API indisponível (sem chave, rede fora, erro HTTP) degrada graciosamente,
+  sem quebrar nada (equivalente a RF-53).
 
-Requisitos cobertos: RF-51 a RF-56, RF-59, RF-62.
+Requisitos cobertos: RF-51 a RF-56, RF-59, RF-62 (adaptados de Ollama→Gemini).
 """
 
 from __future__ import annotations
 
 import json
-import os
-import re
-import shutil
-import subprocess
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from organizer import db, log, rules
+from organizer import log, rules
 from organizer.queue import Motivo
 
-#: Chave do cache de disponibilidade em `config_kv` e seu TTL de 1 h (RF-54).
-CHAVE_CACHE = "llm_disponivel"
-TTL_CACHE_SEGUNDOS = 3600
-
-#: Chave que memoriza se esta instalação aceita as flags extras (ARQUITETURA §9).
-CHAVE_FORMATO = "llm_aceita_flags_extras"
+#: Base da API REST do Gemini (v1beta — `responseSchema` ainda não é GA em v1).
+ENDPOINT_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 #: Tentativas de chamada ao LLM antes de mandar o arquivo para o `_Inbox` (RF-59).
 MAX_TENTATIVAS_LLM = 2
-
-#: Timeout do `ollama list` da checagem de disponibilidade.
-TIMEOUT_LISTAGEM = 10
 
 #: Tamanho do trecho na segunda tentativa do parser em cascata.
 CHARS_RETRY = 200
@@ -46,13 +39,14 @@ CHARS_RETRY = 200
 #: Confiança usada quando o modelo devolve um valor inútil (RF-62).
 CONFIANCA_PADRAO = 0.5
 
-SEM_TEXTO = "(sem texto extraido)"
+#: Temperatura baixa: queremos a classificação mais provável, não criatividade.
+TEMPERATURA = 0.1
 
-_CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+SEM_TEXTO = "(sem texto extraido)"
 
 _logger = log.get_logger("llm")
 
-#: Um único WARNING por processo quando o Ollama não está disponível (RF-53).
+#: Um único WARNING por processo quando a API não está disponível (RF-53).
 _avisou = False
 
 #: Por que `classificar` devolveu `None` para cada arquivo — lido por `classify`.
@@ -70,7 +64,7 @@ class RespostaLLM:
 
 
 class Indisponivel(RuntimeError):
-    """O binário, o modelo ou a chamada falharam."""
+    """A chave, a rede ou a chamada falharam."""
 
 
 class TimeoutLLM(RuntimeError):
@@ -82,62 +76,32 @@ class TimeoutLLM(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
-def binario_presente(cfg) -> bool:
-    """`True` se `OLLAMA_BIN` existe (aceita nome no PATH ou caminho absoluto)."""
-    return shutil.which(cfg.ollama_bin) is not None
-
-
-def _modelo_listado(cfg) -> bool:
-    """Roda `ollama list` e procura o modelo configurado."""
-    try:
-        processo = subprocess.run(
-            [cfg.ollama_bin, "list"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=TIMEOUT_LISTAGEM,
-            creationflags=_CREATE_NO_WINDOW,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    if processo.returncode != 0:
-        return False
-    saida = (processo.stdout or "").lower()
-    nome = cfg.ollama_model.lower()
-    # `ollama list` mostra `phi3:mini`; aceitamos também o nome sem a tag
-    return nome in saida or nome.split(":", 1)[0] in saida
-
-
 def avisar_indisponivel(cfg) -> Motivo:
-    """Emite (uma única vez por processo) a instrução de instalação (RF-53)."""
+    """Emite (uma única vez por processo) a instrução de configuração (RF-53)."""
     global _avisou
     if not _avisou:
         _avisou = True
         _logger.warning(
-            "LLM indisponível — arquivos ambíguos vão para o _Inbox. "
-            "Para habilitar: ollama pull %s",
-            cfg.ollama_model,
+            "Gemini indisponível — arquivos ambíguos vão para o _Inbox. "
+            "Gere uma chave em https://aistudio.google.com/apikey e defina "
+            "GEMINI_API_KEY no .env"
         )
     return Motivo.LLM_INDISPONIVEL
 
 
 def disponivel(cfg, conn=None) -> bool:
-    """Ollama utilizável? Resultado cacheado em `config_kv` por 1 h (RF-54)."""
+    """Gemini utilizável? Só depende de `LLM_ENABLED` e da chave estar presente.
+
+    Diferente do Ollama, não há um "binário instalado" para checar — a
+    verificação é O(1) e não precisa de cache (RF-54 deixou de fazer sentido
+    aqui: cachear uma comparação de string não economiza nada).
+    """
     if not cfg.llm_enabled:
         return False
-
-    if conn is not None:
-        cacheado = db.kv_get(conn, CHAVE_CACHE)
-        if cacheado is not None:
-            return cacheado == "1"
-
-    resultado = binario_presente(cfg) and _modelo_listado(cfg)
-    if conn is not None:
-        db.kv_set(conn, CHAVE_CACHE, "1" if resultado else "0", TTL_CACHE_SEGUNDOS)
-    if not resultado:
+    if not cfg.gemini_api_key:
         avisar_indisponivel(cfg)
-    return resultado
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -152,6 +116,8 @@ _INSTRUCAO = (
 
 #: Few-shot. Cobre justamente as quatro categorias que o phi3:mini errava sem
 #: exemplo (medido na auditoria: Notas-Fiscais, Certificados, RG-CPF, Trabalhos).
+#: Mantido com o Gemini: o few-shot ajuda tanto quanto o `responseSchema` ajuda
+#: a forma — um restringe a sintaxe, o outro guia o julgamento.
 #: São exemplos inventados; nenhum arquivo real do usuário foi usado.
 EXEMPLOS = """Exemplos de resposta correta:
 
@@ -240,67 +206,8 @@ def prompt_de_retry(prompt: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Parser em cascata (RF-55)
+# Parser em cascata (RF-55) — rede de segurança mesmo com responseSchema
 # --------------------------------------------------------------------------- #
-
-
-#: Sequência CSI (`ESC [ ... letra`) — é o que o `ollama run` injeta no stdout.
-_CSI = re.compile(r"\x1b\[([0-9;?]*)([ -/]*)([@-~])")
-
-
-def limpar_terminal(texto: str) -> str:
-    """Desfaz o redesenho de terminal que o `ollama run` deixa vazar no stdout.
-
-    Medido nesta máquina com ollama 0.32.5: ao quebrar linha, o CLI emite
-    `ESC[8D` (recua 8 colunas) + `ESC[K` (apaga até o fim da linha) e reimprime
-    o pedaço — **no meio de uma string JSON**, o que invalida o `json.loads`.
-    `--nowordwrap` evita isso na origem; esta função é a segunda linha de
-    defesa, para instalações que não conheçam a flag.
-
-    `ESC[<n>D` é interpretado de verdade (apaga os `n` últimos caracteres já
-    emitidos); as demais sequências são só cosméticas e somem.
-    """
-    if "\x1b" not in texto:
-        return texto
-    saida: list[str] = []
-    posicao = 0
-    for achado in _CSI.finditer(texto):
-        saida.append(texto[posicao : achado.start()])
-        posicao = achado.end()
-        parametros, _, final = achado.groups()
-        if final == "D":
-            recuo = int(parametros) if parametros.isdigit() else 1
-            acumulado = "".join(saida)
-            saida = [acumulado[:-recuo] if recuo else acumulado]
-    saida.append(texto[posicao:])
-    limpo = "".join(saida).replace("\x1b", "")
-    return "".join(ch for ch in limpo if ch >= " " or ch in "\n\r\t")
-
-
-def normalizar_quebras_em_strings(texto: str) -> str:
-    """Troca quebras de linha **dentro** de strings JSON por espaço.
-
-    JSON não aceita caractere de controle cru dentro de string; o modelo às vezes quebra a
-    linha no meio do campo `motivo`. Fora das strings, a formatação é preservada.
-    """
-    saida: list[str] = []
-    em_string = False
-    escapado = False
-    for ch in texto:
-        if em_string:
-            if escapado:
-                escapado = False
-            elif ch == "\\":
-                escapado = True
-            elif ch == '"':
-                em_string = False
-            if ch in "\n\r\t" and not escapado:
-                saida.append(" ")
-                continue
-        elif ch == '"':
-            em_string = True
-        saida.append(ch)
-    return "".join(saida)
 
 
 def sem_cercas(texto: str) -> str:
@@ -350,30 +257,52 @@ def primeiro_objeto(texto: str) -> str | None:
     return None
 
 
+def normalizar_quebras_em_strings(texto: str) -> str:
+    """Troca quebras de linha **dentro** de strings JSON por espaço.
+
+    JSON não aceita caractere de controle cru dentro de string; mantido como
+    rede de segurança caso a API devolva um `motivo` com quebra de linha crua.
+    """
+    saida: list[str] = []
+    em_string = False
+    escapado = False
+    for ch in texto:
+        if em_string:
+            if escapado:
+                escapado = False
+            elif ch == "\\":
+                escapado = True
+            elif ch == '"':
+                em_string = False
+            if ch in "\n\r\t" and not escapado:
+                saida.append(" ")
+                continue
+        elif ch == '"':
+            em_string = True
+        saida.append(ch)
+    return "".join(saida)
+
+
 def _candidatos(bruto: str):
     """Formas sucessivamente mais agressivas de achar o objeto na saída."""
     vistos: set[str] = set()
-    for base in (bruto.strip(), limpar_terminal(bruto).strip()):
-        if not base:
-            continue
-        objeto = primeiro_objeto(base)
-        for candidato in (
-            base,
-            sem_cercas(base),
-            objeto,
-            normalizar_quebras_em_strings(objeto) if objeto else None,
-        ):
-            if candidato and candidato not in vistos:
-                vistos.add(candidato)
-                yield candidato
+    base = bruto.strip()
+    if not base:
+        return
+    objeto = primeiro_objeto(base)
+    for candidato in (
+        base,
+        sem_cercas(base),
+        objeto,
+        normalizar_quebras_em_strings(objeto) if objeto else None,
+    ):
+        if candidato and candidato not in vistos:
+            vistos.add(candidato)
+            yield candidato
 
 
 def parsear(bruto: str | None) -> dict | None:
-    """Níveis 1 a 3 da cascata: JSON puro, sem cercas, objeto balanceado (RF-55).
-
-    Cada nível é tentado duas vezes: sobre a saída crua e sobre a saída livre de
-    sequências de terminal.
-    """
+    """Níveis 1 a 3 da cascata: JSON puro, sem cercas, objeto balanceado (RF-55)."""
     if not bruto or not bruto.strip():
         return None
     for candidato in _candidatos(bruto):
@@ -403,7 +332,7 @@ def normalizar_confianca(bruta) -> float:
 
 
 #: Grafias que o modelo usa para cada chave. O prompt pede sem acento, mas o
-#: phi3:mini às vezes devolve `"confiança"` / `"categoría"` — e a leitura crua
+#: modelo às vezes devolve `"confiança"` / `"categoría"` — e a leitura crua
 #: caía em silêncio no default de 0.5, jogando fora informação boa.
 _SINONIMOS_DE_CHAVE = {
     "categoria": ("categoria", "categoría", "category"),
@@ -467,125 +396,89 @@ def _como_float(bruta):
 
 
 # --------------------------------------------------------------------------- #
-# Invocação
+# Invocação HTTP
 # --------------------------------------------------------------------------- #
 
 
-def _matar_orfaos(cfg, desde: float) -> int:
-    """Reforço do kill: derruba processos do Ollama nascidos durante esta chamada.
+def _schema_resposta() -> dict:
+    """`responseSchema` que restringe `categoria` ao enum fechado na origem.
 
-    `subprocess.run` já mata o filho direto ao estourar o timeout, mas não
-    alcança netos — e no Windows um neto órfão não é reparentado, então não dá
-    para achá-lo por `children()` depois que o intermediário morre.
-
-    Dois critérios, sempre combinados com o horário de criação (só processos
-    nascidos **durante esta chamada**), para nunca tocar num Ollama que já
-    estava de pé — o servidor do aplicativo de desktop, por exemplo:
-
-    1. o nome do executável é o de `OLLAMA_BIN` (o caso normal);
-    2. a linha de comando cita ao mesmo tempo o binário configurado e o modelo
-       — é o que pega um *wrapper* (`.cmd`, `.bat`, um interpretador) entre nós
-       e o Ollama, que o critério 1 sozinho não enxerga.
-
-    Limitação conhecida: um wrapper que não repasse nem o nome do binário nem o
-    do modelo na linha de comando continua invisível. Não há como identificá-lo
-    sem capturar o PID, o que exigiria trocar `subprocess.run` por `Popen`.
+    Não substitui `validar()` — uma resposta bloqueada por safety ou cortada
+    por `MAX_TOKENS` ainda pode chegar fora do schema — mas reduz bastante a
+    taxa de categoria inválida que o phi3:mini produzia sem essa amarra.
     """
-    caminho = Path(shutil.which(cfg.ollama_bin) or cfg.ollama_bin)
-    alvo = caminho.name.lower()
-    marca = caminho.stem.lower()
-    modelo = (cfg.ollama_model or "").lower()
-    mortos = 0
-    try:
-        import psutil
-    except ImportError:  # pragma: no cover - psutil é dependência do núcleo
-        return 0
-
-    def _e_nosso(info) -> bool:
-        if (info.get("name") or "").lower() == alvo:
-            return True
-        linha = " ".join(info.get("cmdline") or []).lower()
-        return bool(marca and modelo and marca in linha and modelo in linha)
-
-    for processo in psutil.process_iter(["name", "create_time", "cmdline"]):
-        try:
-            if (processo.info["create_time"] or 0) < desde:
-                continue
-            if not _e_nosso(processo.info):
-                continue
-            for filho in processo.children(recursive=True):
-                try:
-                    filho.kill()
-                    mortos += 1
-                except Exception:
-                    continue
-            processo.kill()
-            mortos += 1
-        except Exception:
-            continue
-    if mortos:
-        _logger.warning("timeout do LLM: %s processo(s) órfão(s) do Ollama derrubado(s)", mortos)
-    return mortos
+    return {
+        "type": "OBJECT",
+        "properties": {
+            "categoria": {"type": "STRING", "enum": list(rules.CATEGORIAS)},
+            "nome_sugerido": {"type": "STRING"},
+            "confianca": {"type": "NUMBER"},
+            "motivo": {"type": "STRING"},
+        },
+        "required": ["categoria", "nome_sugerido", "confianca", "motivo"],
+    }
 
 
-#: Flags opcionais. `--format json` pede JSON ao modelo; `--nowordwrap` impede o
-#: CLI de reposicionar o cursor no meio da resposta (ver `limpar_terminal`).
-#: Instalações antigas podem não conhecê-las — daí serem opcionais.
-FLAGS_EXTRAS = ("--format", "json", "--nowordwrap")
+def _extrair_texto(corpo_resposta: str) -> str:
+    """Puxa o texto gerado do envelope JSON da API do Gemini.
 
-
-def argumentos(cfg, com_extras: bool = True) -> list[str]:
-    """Linha de comando. O prompt **não** aparece aqui — ele vai por stdin (RF-52)."""
-    argv = [cfg.ollama_bin, "run", cfg.ollama_model]
-    if com_extras:
-        argv += list(FLAGS_EXTRAS)
-    return argv
-
-
-def _flag_rejeitada(stderr: str | None) -> bool:
-    texto = (stderr or "").lower()
-    return "unknown flag" in texto or "unknown shorthand" in texto
-
-
-def executar(cfg, prompt: str, conn=None, _com_extras: bool | None = None) -> str:
-    """Roda o modelo uma vez e devolve o stdout cru.
-
-    O processo nasce, é aguardado e morre dentro desta função: nenhum servidor
-    fica de pé por nossa conta (RF-51).
+    Resposta vazia (bloqueio de safety, MAX_TOKENS antes do JSON fechar) não
+    quebra — vira string vazia e cai no parser em cascata como qualquer saída
+    inválida (RF-55), que manda o arquivo para o `_Inbox`.
     """
-    if _com_extras is None:
-        _com_extras = db.kv_get(conn, CHAVE_FORMATO) != "0" if conn is not None else True
-
-    inicio = time.time()
     try:
-        processo = subprocess.run(
-            argumentos(cfg, _com_extras),
-            input=prompt,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=cfg.llm_timeout,
-            creationflags=_CREATE_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _matar_orfaos(cfg, inicio)
-        raise TimeoutLLM(f"ollama excedeu {cfg.llm_timeout}s") from exc
-    except (OSError, subprocess.SubprocessError) as exc:
+        dados = json.loads(corpo_resposta)
+    except (ValueError, TypeError):
+        return ""
+    candidatos = dados.get("candidates") or []
+    if not candidatos:
+        return ""
+    partes = (candidatos[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in partes if isinstance(p, dict))
+
+
+def executar(cfg, prompt: str, conn=None) -> str:
+    """Chama a API do Gemini uma vez e devolve o texto cru da resposta.
+
+    Uma requisição HTTP síncrona por chamada: nenhuma conexão fica de pé por
+    nossa conta (equivalente a RF-51). `conn` é aceito por compatibilidade com
+    `search.rerankear`, que não precisa mais dele.
+    """
+    corpo = json.dumps(
+        {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": TEMPERATURA,
+                "responseMimeType": "application/json",
+                "responseSchema": _schema_resposta(),
+            },
+        }
+    ).encode("utf-8")
+
+    requisicao = urllib.request.Request(
+        f"{ENDPOINT_BASE}/{cfg.gemini_model}:generateContent",
+        data=corpo,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": cfg.gemini_api_key,
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(requisicao, timeout=cfg.llm_timeout) as resposta:
+            bruto = resposta.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detalhe = exc.read().decode("utf-8", errors="replace")[:200]
+        raise Indisponivel(f"gemini respondeu {exc.code}: {detalhe}") from exc
+    except TimeoutError as exc:
+        raise TimeoutLLM(f"gemini excedeu {cfg.llm_timeout}s") from exc
+    except urllib.error.URLError as exc:
+        raise Indisponivel(str(exc.reason)) from exc
+    except OSError as exc:
         raise Indisponivel(str(exc)) from exc
 
-    if _com_extras and processo.returncode != 0 and _flag_rejeitada(processo.stderr):
-        # esta instalação não conhece as flags: memoriza e refaz sem elas
-        _logger.info("ollama rejeitou as flags extras; usando só o parser tolerante")
-        if conn is not None:
-            db.kv_set(conn, CHAVE_FORMATO, "0")
-        return executar(cfg, prompt, conn, _com_extras=False)
-
-    if processo.returncode != 0:
-        raise Indisponivel(
-            f"ollama saiu com {processo.returncode}: {(processo.stderr or '')[:200]}"
-        )
-    return processo.stdout or ""
+    return _extrair_texto(bruto)
 
 
 # --------------------------------------------------------------------------- #
@@ -616,7 +509,7 @@ def classificar(origem: Path, cfg, texto: str | None = None, conn=None) -> Respo
             prompt = prompt_de_retry(prompt)
             continue
         except Indisponivel as exc:
-            _logger.warning("ollama indisponível durante a chamada: %s", exc)
+            _logger.warning("gemini indisponível durante a chamada: %s", exc)
             _motivo_da_falha[alvo] = Motivo.LLM_INDISPONIVEL
             return None
 

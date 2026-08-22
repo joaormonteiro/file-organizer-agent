@@ -1,7 +1,8 @@
-"""RF-51 a RF-56, RF-59, RF-62 — fronteira com o Ollama.
+"""RF-51 a RF-56, RF-59, RF-62 — fronteira com a API do Gemini.
 
-Todos os testes usam o dublê de `tests/fake_ollama.py`: a suíte tem de passar
-numa máquina sem Ollama nenhum (RNF-05).
+Todos os testes usam o dublê `gemini_falso` (conftest.py, substitui
+`urllib.request.urlopen`): a suíte tem de passar sem rede e sem uma
+`GEMINI_API_KEY` real (RNF-05).
 """
 
 from __future__ import annotations
@@ -14,15 +15,15 @@ from pathlib import Path
 import pytest
 
 import factories
-from organizer import config, db, llm, rules
+from organizer import config, llm, rules
 from organizer.queue import Motivo
 
 RAIZ_PROJETO = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
-def cfg(sandbox, ollama_falso):
-    """Config já apontando para o Ollama falso."""
+def cfg(sandbox, gemini_falso):
+    """Config já apontando para o Gemini falso."""
     config.get_config.cache_clear()
     return config.get_config()
 
@@ -33,64 +34,55 @@ def alvo(sandbox):
 
 
 # --------------------------------------------------------------------------- #
-# RF-51 / RF-52 — processo efêmero, prompt por stdin
+# RF-51 / RF-52 — chamada efêmera, prompt no corpo (não na URL)
 # --------------------------------------------------------------------------- #
 
 
-def test_processo_encerra(cfg, alvo, ollama_falso):
-    """RF-51: o Ollama é chamado como subprocess que morre ao terminar."""
-    import psutil
+def test_cada_chamada_e_independente(cfg, alvo, gemini_falso):
+    """RF-51 equivalente: nenhuma conexão/sessão é reaproveitada entre chamadas."""
+    gemini_falso.limpar()
+    llm.classificar(alvo, cfg)
+    llm.classificar(alvo, cfg)
 
-    antes = {p.pid for p in psutil.process_iter()}
-    resposta = llm.classificar(alvo, cfg)
-    depois = {p.pid for p in psutil.process_iter()}
-
-    assert resposta is not None
-    novos_vivos = [
-        p for p in psutil.process_iter(["name"]) if p.pid in (depois - antes)
-    ]
-    nomes = {(p.info["name"] or "").lower() for p in novos_vivos}
-    assert "ollama-falso.cmd" not in nomes
-    assert not any("fake_ollama" in n for n in nomes)
+    chamadas = gemini_falso.chamadas
+    assert len(chamadas) == 2, "cada classificação deveria disparar sua própria requisição"
 
 
 def test_nenhum_servidor_e_mantido_vivo():
-    """RF-51: `llm.py` não sobe `ollama serve` nem guarda um Popen persistente.
-
-    A checagem é sobre o **código**: docstrings podem citar `Popen` ao explicar
-    por que ele não é usado.
-    """
+    """RF-51: `llm.py` fala HTTP direto, sem abrir socket de servidor nem Popen."""
     from test_isolation import linhas_efetivas
 
     codigo = "\n".join(t for _, t in linhas_efetivas(RAIZ_PROJETO / "organizer" / "llm.py"))
-    assert "subprocess.run(" in codigo
-    assert "serve" not in codigo
+    assert "urllib.request.urlopen(" in codigo
     assert "Popen" not in codigo
+    assert "socket.socket(" not in codigo
 
 
-def test_prompt_por_stdin(cfg, alvo, ollama_falso):
-    """RF-52: o texto do prompt não aparece em argv — só em stdin."""
-    ollama_falso.limpar()
+def test_prompt_no_corpo_nao_na_url(cfg, alvo, gemini_falso):
+    """RF-52 equivalente: o texto do prompt vai no corpo POST, nunca na URL."""
+    gemini_falso.limpar()
     llm.classificar(alvo, cfg, texto="matriz curricular da unifesp 2026")
 
-    chamadas = [c for c in ollama_falso.chamadas if c["argv"][:1] != ["list"]]
+    chamadas = gemini_falso.chamadas
     assert chamadas, "o dublê não foi chamado"
     chamada = chamadas[-1]
 
-    assert chamada["argv"] == ["run", "phi3:mini", *llm.FLAGS_EXTRAS]
-    argv_inteiro = " ".join(chamada["argv"])
-    assert "matriz curricular" not in argv_inteiro
-    assert "document.pdf" not in argv_inteiro
-    # e o prompt chegou inteiro por stdin
+    assert "matriz curricular" not in chamada["url"]
+    assert "document.pdf" not in chamada["url"]
+    # e o prompt chegou inteiro no corpo
     assert "matriz curricular da unifesp 2026" in chamada["prompt"]
     assert "document.pdf" in chamada["prompt"]
 
 
-def test_argumentos_nao_carregam_o_prompt(cfg):
-    """RF-52: a montagem de argv é auditável e não tem espaço para o prompt."""
-    assert llm.argumentos(cfg) == [cfg.ollama_bin, "run", cfg.ollama_model, *llm.FLAGS_EXTRAS]
-    assert llm.argumentos(cfg, com_extras=False) == [cfg.ollama_bin, "run", cfg.ollama_model]
-    assert "--nowordwrap" in llm.FLAGS_EXTRAS
+def test_chave_vai_no_header_nao_na_url(cfg, alvo, gemini_falso):
+    """A API key nunca aparece na URL (evita vazar em logs de acesso)."""
+    gemini_falso.limpar()
+    llm.classificar(alvo, cfg)
+
+    chamada = gemini_falso.chamadas[-1]
+    assert chamada["chave"] == cfg.gemini_api_key
+    assert cfg.gemini_api_key not in chamada["url"]
+    assert cfg.gemini_model in chamada["url"]
 
 
 def test_prompt_lista_as_categorias_canonicas(cfg, alvo):
@@ -116,14 +108,21 @@ def test_prompt_de_retry_encurta_o_trecho(cfg, alvo):
     assert "Responda SOMENTE o JSON" in retry
 
 
+def test_schema_restringe_categoria_ao_enum():
+    """`responseSchema` fecha `categoria` no mesmo enum que `rules.categoria_valida` aceita."""
+    schema = llm._schema_resposta()
+    assert schema["properties"]["categoria"]["enum"] == list(rules.CATEGORIAS)
+    assert set(schema["required"]) == {"categoria", "nome_sugerido", "confianca", "motivo"}
+
+
 # --------------------------------------------------------------------------- #
-# RF-53 / RF-54 — disponibilidade e cache
+# RF-53 — disponibilidade
 # --------------------------------------------------------------------------- #
 
 
-def test_ollama_ausente(sandbox, monkeypatch, caplog):
-    """RF-53: binário ausente → `disponivel()` False, WARNING único, nada quebra."""
-    monkeypatch.setenv("OLLAMA_BIN", "ollama-que-nao-existe-em-lugar-nenhum")
+def test_chave_ausente(sandbox, monkeypatch, caplog):
+    """RF-53: sem `GEMINI_API_KEY` → `disponivel()` False, WARNING único, nada quebra."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     monkeypatch.setattr(llm, "_avisou", False)
     config.get_config.cache_clear()
     cfg_local = config.get_config()
@@ -132,53 +131,28 @@ def test_ollama_ausente(sandbox, monkeypatch, caplog):
         assert llm.disponivel(cfg_local) is False
         assert llm.disponivel(cfg_local) is False
 
-    assert llm.binario_presente(cfg_local) is False
-    assert caplog.text.count("ollama pull") == 1, "o aviso tem de ser único"
-    assert "phi3:mini" in caplog.text
+    assert caplog.text.count("aistudio.google.com") == 1, "o aviso tem de ser único"
+    assert "GEMINI_API_KEY" in caplog.text
 
     alvo_local = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
     assert llm.classificar(alvo_local, cfg_local) is None
     assert llm.motivo_da_falha(alvo_local, cfg_local) == Motivo.LLM_INDISPONIVEL
 
 
-def test_modelo_ausente(cfg, alvo, ollama_falso):
-    """RF-53: binário presente mas modelo não baixado → indisponível."""
-    ollama_falso.modo("modelo_ausente")
-    assert llm.binario_presente(cfg) is True
-    assert llm.disponivel(cfg) is False
-    assert llm.classificar(alvo, cfg) is None
-
-
-def test_list_com_erro_e_tratado(cfg, ollama_falso):
-    ollama_falso.modo("list_quebrado")
-    assert llm.disponivel(cfg) is False
-
-
-def test_llm_desligado_na_config(sandbox, ollama_falso):
+def test_llm_desligado_na_config(sandbox, gemini_falso):
     cfg_local = dataclasses.replace(config.get_config(), llm_enabled=False)
     assert llm.disponivel(cfg_local) is False
 
 
-def test_cache_de_disponibilidade(cfg, conn, ollama_falso):
-    """RF-54: com `conn`, a segunda chamada não executa subprocess (TTL de 1 h)."""
-    ollama_falso.limpar()
-    assert llm.disponivel(cfg, conn) is True
-    assert db.kv_get(conn, llm.CHAVE_CACHE) == "1"
+def test_disponivel_reflete_configuracao_imediatamente(sandbox, monkeypatch):
+    """Diferente do Ollama, checar a chave é O(1) — não há cache para ficar obsoleto."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    config.get_config.cache_clear()
+    assert llm.disponivel(config.get_config()) is False
 
-    # se o cache não valesse, `disponivel` chamaria `ollama list` de novo e
-    # passaria a responder False neste modo
-    ollama_falso.modo("modelo_ausente")
-    assert llm.disponivel(cfg, conn) is True, "a segunda chamada não usou o cache"
-
-    assert llm.TTL_CACHE_SEGUNDOS == 3600
-
-
-def test_cache_expira(cfg, conn, ollama_falso):
-    from datetime import timedelta
-
-    llm.disponivel(cfg, conn)
-    depois = db.agora() + timedelta(hours=2)
-    assert db.kv_get(conn, llm.CHAVE_CACHE, depois) is None
+    monkeypatch.setenv("GEMINI_API_KEY", "agora-tem-chave")
+    config.get_config.cache_clear()
+    assert llm.disponivel(config.get_config()) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -194,12 +168,13 @@ def test_cache_expira(cfg, conn, ollama_falso):
         ("prosa_com_json", True),
         ("lixo_depois_json", True),
         ("lixo", False),
+        ("bloqueio_safety", False),
     ],
 )
-def test_parsing(cfg, alvo, ollama_falso, modo, esperado):
+def test_parsing(cfg, alvo, gemini_falso, modo, esperado):
     """RF-55: JSON puro, cerca markdown, objeto balanceado, retry e falha final."""
-    ollama_falso.modo(modo)
-    ollama_falso.limpar()
+    gemini_falso.modo(modo)
+    gemini_falso.limpar()
 
     resposta = llm.classificar(alvo, cfg)
 
@@ -211,14 +186,14 @@ def test_parsing(cfg, alvo, ollama_falso, modo, esperado):
         assert llm.motivo_da_falha(alvo, cfg) == Motivo.LLM_PARSE_ERROR
 
 
-def test_retry_acontece_uma_unica_vez(cfg, alvo, ollama_falso):
-    """RF-55 nível 4: exatamente um retry, com prompt encurtado."""
-    ollama_falso.modo("lixo")
-    ollama_falso.limpar()
+def test_retry_acontece_uma_unica_vez(cfg, alvo, gemini_falso):
+    """RF-55: exatamente um retry, com prompt encurtado."""
+    gemini_falso.modo("lixo")
+    gemini_falso.limpar()
 
     llm.classificar(alvo, cfg, texto="x" * 500)
 
-    chamadas = [c for c in ollama_falso.chamadas if c["argv"][:1] != ["list"]]
+    chamadas = gemini_falso.chamadas
     assert len(chamadas) == llm.MAX_TENTATIVAS_LLM == 2
     assert "Responda SOMENTE o JSON" in chamadas[1]["prompt"]
     assert len(chamadas[1]["prompt"]) < len(chamadas[0]["prompt"])
@@ -243,28 +218,6 @@ def test_parsear_unitario(bruto, esperado):
     assert llm.parsear(bruto) == esperado
 
 
-def test_limpar_terminal_desfaz_o_redesenho_do_ollama():
-    """Defeito real medido com ollama 0.32.5: CSI no meio da string JSON.
-
-    O CLI recua o cursor e reimprime o pedaço ao quebrar a linha. Sem desfazer
-    isso, `json.loads` recusa a resposta inteira — e todo documento cairia no
-    `_Inbox` com `llm_parse_error`.
-    """
-    bruto = '{"motivo": "servicos eletroni\x1b[8D\x1b[K\neletronicos"}'
-    limpo = llm.limpar_terminal(bruto)
-    assert "\x1b" not in limpo
-    assert "eletronieletronicos" not in limpo, "o recuo do cursor não foi aplicado"
-    assert llm.parsear(bruto) == {"motivo": "servicos  eletronicos"}
-
-
-def test_parser_sobrevive_a_saida_real_do_ollama(cfg, alvo, ollama_falso):
-    """Ponta a ponta com o dublê emitindo as mesmas sequências do ollama real."""
-    ollama_falso.modo("ansi_do_terminal")
-    resposta = llm.classificar(alvo, cfg)
-    assert resposta is not None
-    assert resposta.categoria == rules.CAT_MATRIZES
-
-
 def test_normalizar_quebras_so_dentro_de_strings():
     assert llm.normalizar_quebras_em_strings('{"a": "x\ny"}') == '{"a": "x y"}'
     # fora de string, a formatação é preservada
@@ -278,14 +231,27 @@ def test_primeiro_objeto_ignora_chave_dentro_de_string():
     assert llm.primeiro_objeto("{incompleto") is None
 
 
+def test_sem_cercas():
+    assert llm.sem_cercas('{"a":1}') == '{"a":1}'
+    assert llm.sem_cercas('```json\n{"a":1}\n```').strip() == '{"a":1}'
+    assert llm.sem_cercas("```\nsem chaves\n```") == "```\nsem chaves\n```"
+
+
+def test_extrair_texto_de_resposta_bloqueada_nao_quebra():
+    """Bloqueio de safety devolve `candidates: []` — vira string vazia, não exceção."""
+    assert llm._extrair_texto(json.dumps({"candidates": []})) == ""
+    assert llm._extrair_texto("nao e json") == ""
+
+
 # --------------------------------------------------------------------------- #
 # RF-56 / RF-62 — validação semântica
 # --------------------------------------------------------------------------- #
 
 
-def test_categoria_invalida_descarta_resposta(cfg, alvo, ollama_falso):
-    """RF-56: categoria fora do enum invalida a resposta inteira."""
-    ollama_falso.modo("categoria_invalida")
+def test_categoria_invalida_descarta_resposta(cfg, alvo, gemini_falso):
+    """RF-56: categoria fora do enum invalida a resposta inteira (rede de segurança:
+    o `responseSchema` já deveria ter barrado isso na origem)."""
+    gemini_falso.modo("categoria_invalida")
     assert llm.classificar(alvo, cfg) is None
     assert llm.motivo_da_falha(alvo, cfg) == Motivo.LLM_PARSE_ERROR
 
@@ -329,7 +295,7 @@ def test_confianca_invalida(bruta, esperada):
     ],
 )
 def test_chave_acentuada_ou_em_ingles_e_aceita(chave, valor):
-    """Achado da auditoria: o phi3:mini devolve `"confiança"` de vez em quando.
+    """O modelo às vezes devolve `"confiança"` de vez em quando, mesmo com schema.
 
     Antes, a leitura crua achava `None` e caía em silêncio para 0.5, jogando
     fora um número perfeitamente bom.
@@ -372,13 +338,13 @@ def test_normalizar_chaves_preserva_o_canonico():
     assert normalizado["confianca"] == 0.9
 
 
-def test_confianca_invalida_ponta_a_ponta(cfg, alvo, ollama_falso):
-    ollama_falso.modo("confianca_invalida")
+def test_confianca_invalida_ponta_a_ponta(cfg, alvo, gemini_falso):
+    gemini_falso.modo("confianca_invalida")
     resposta = llm.classificar(alvo, cfg)
     assert resposta is not None
     assert resposta.confianca == llm.CONFIANCA_PADRAO
 
-    ollama_falso.modo("confianca_fora_do_intervalo")
+    gemini_falso.modo("confianca_fora_do_intervalo")
     assert llm.classificar(alvo, cfg).confianca == llm.CONFIANCA_PADRAO
 
 
@@ -387,12 +353,11 @@ def test_confianca_invalida_ponta_a_ponta(cfg, alvo, ollama_falso):
 # --------------------------------------------------------------------------- #
 
 
-def test_timeout(sandbox, ollama_falso, monkeypatch, caplog):
-    """RF-59: `LLM_TIMEOUT` é aplicado e o timeout não deixa processo para trás."""
-    monkeypatch.setenv("LLM_TIMEOUT", "1")
+def test_timeout(sandbox, gemini_falso, caplog):
+    """RF-59: timeout vira `TimeoutLLM`, tratado sem exceção subir para o chamador."""
     config.get_config.cache_clear()
     cfg_local = config.get_config()
-    ollama_falso.modo("dorme", FAKE_OLLAMA_SONO="20")
+    gemini_falso.modo("dorme")
     alvo_local = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
 
     with caplog.at_level(logging.WARNING, logger="organizer.llm"):
@@ -403,28 +368,23 @@ def test_timeout(sandbox, ollama_falso, monkeypatch, caplog):
     assert "timeout do LLM" in caplog.text
 
 
-def test_timeout_tenta_duas_vezes(sandbox, ollama_falso, monkeypatch):
+def test_timeout_tenta_duas_vezes(sandbox, gemini_falso):
     """RF-59: `MAX_TENTATIVAS_LLM` chamadas antes de desistir."""
-    monkeypatch.setenv("LLM_TIMEOUT", "1")
     config.get_config.cache_clear()
     cfg_local = config.get_config()
-    ollama_falso.modo("dorme", FAKE_OLLAMA_SONO="20")
-    ollama_falso.limpar()
+    gemini_falso.modo("dorme")
+    gemini_falso.limpar()
     alvo_local = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
 
     llm.classificar(alvo_local, cfg_local)
 
-    chamadas = [c for c in ollama_falso.chamadas if c["argv"][:1] != ["list"]]
-    assert len(chamadas) == llm.MAX_TENTATIVAS_LLM
+    assert len(gemini_falso.chamadas) == llm.MAX_TENTATIVAS_LLM
 
 
-def test_executar_levanta_timeout(cfg, ollama_falso, monkeypatch):
-    monkeypatch.setenv("LLM_TIMEOUT", "1")
-    config.get_config.cache_clear()
-    cfg_local = config.get_config()
-    ollama_falso.modo("dorme", FAKE_OLLAMA_SONO="20")
+def test_executar_levanta_timeout(cfg, gemini_falso):
+    gemini_falso.modo("dorme")
     with pytest.raises(llm.TimeoutLLM):
-        llm.executar(cfg_local, "prompt qualquer")
+        llm.executar(cfg, "prompt qualquer")
 
 
 # --------------------------------------------------------------------------- #
@@ -432,41 +392,26 @@ def test_executar_levanta_timeout(cfg, ollama_falso, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_erro_do_binario_vira_indisponivel(cfg, alvo, ollama_falso):
-    ollama_falso.modo("erro")
+def test_erro_http_vira_indisponivel(cfg, alvo, gemini_falso):
+    gemini_falso.modo("erro")
     assert llm.classificar(alvo, cfg) is None
     assert llm.motivo_da_falha(alvo, cfg) == Motivo.LLM_INDISPONIVEL
 
 
-def test_flag_format_rejeitada_e_memorizada(cfg, conn, alvo, ollama_falso):
-    """ARQUITETURA §9: instalação sem `--format json` é detectada uma vez e memorizada."""
-    ollama_falso.modo("flag_desconhecida")
-    ollama_falso.limpar()
-
-    resposta = llm.classificar(alvo, cfg, conn=conn)
-
-    assert resposta is not None, "o parser tolerante devia ter salvado a chamada"
-    assert db.kv_get(conn, llm.CHAVE_FORMATO) == "0"
-    chamadas = [c for c in ollama_falso.chamadas if c["argv"][:1] != ["list"]]
-    assert "--format" in chamadas[0]["argv"]
-    assert "--format" not in chamadas[1]["argv"]
-
-
-def test_sem_cercas():
-    assert llm.sem_cercas('{"a":1}') == '{"a":1}'
-    assert llm.sem_cercas('```json\n{"a":1}\n```').strip() == '{"a":1}'
-    assert llm.sem_cercas("```\nsem chaves\n```") == "```\nsem chaves\n```"
-
-
-def test_binario_inexistente_em_executar(sandbox, monkeypatch):
-    monkeypatch.setenv("OLLAMA_BIN", "nao-existe-mesmo-12345")
-    config.get_config.cache_clear()
-    cfg_local = config.get_config()
+def test_chave_invalida_vira_indisponivel(cfg, gemini_falso):
+    gemini_falso.modo("chave_invalida")
     with pytest.raises(llm.Indisponivel):
-        llm.executar(cfg_local, "prompt")
+        llm.executar(cfg, "prompt qualquer")
 
 
-def test_resposta_valida_completa(cfg, alvo, ollama_falso):
+def test_sem_rede_vira_indisponivel(cfg, gemini_falso):
+    """Internet fora do ar (DNS, sem rota) vira `Indisponivel`, não exceção crua."""
+    gemini_falso.modo("sem_rede")
+    with pytest.raises(llm.Indisponivel):
+        llm.executar(cfg, "prompt qualquer")
+
+
+def test_resposta_valida_completa(cfg, alvo, gemini_falso):
     """O contrato de saída inteiro, campo a campo."""
     resposta = llm.classificar(alvo, cfg, texto="grade curricular da unifesp")
     assert resposta.categoria == rules.CAT_MATRIZES
@@ -476,8 +421,8 @@ def test_resposta_valida_completa(cfg, alvo, ollama_falso):
     assert json.dumps(dataclasses.asdict(resposta))  # serializável
 
 
-def test_motivo_da_falha_e_consumido_uma_vez(cfg, alvo, ollama_falso):
-    ollama_falso.modo("lixo")
+def test_motivo_da_falha_e_consumido_uma_vez(cfg, alvo, gemini_falso):
+    gemini_falso.modo("lixo")
     llm.classificar(alvo, cfg)
     assert llm.motivo_da_falha(alvo, cfg) == Motivo.LLM_PARSE_ERROR
     # já consumido: volta ao motivo genérico

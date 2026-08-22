@@ -177,8 +177,9 @@ def test_hash_completo_antes_de_apagar_a_origem():
 _EXECUCAO = re.compile(r"os\.startfile|os\.system|os\.exec|os\.popen|eval\(|exec\(")
 _SUBPROCESSO = re.compile(r"\bsubprocess\b")
 
-#: Os únicos módulos autorizados a criar processos: o Ollama e o spawn do worker.
-MODULOS_COM_SUBPROCESSO = {"llm.py", "watch.py"}
+#: O único módulo autorizado a criar processos: o spawn do worker. `llm.py`
+#: fala com o Gemini por HTTP (`urllib`), não por subprocess.
+MODULOS_COM_SUBPROCESSO = {"watch.py"}
 
 
 def test_nunca_executa_arquivo_do_usuario():
@@ -212,10 +213,16 @@ def test_executaveis_sao_classificados_so_por_extensao(sandbox):
 
 _REDE = re.compile(r"\b(requests|urllib|httpx|socket|aiohttp)\b")
 
+#: `embeddings.py` baixa o modelo do Hugging Face Hub na primeira execução
+#: (Fase 4); `llm.py` fala com a API do Gemini por HTTP (Fase 3, desde a troca
+#: de Ollama local para Gemini — ver ARQUITETURA §9). As duas exceções são
+#: deliberadas; qualquer outro módulo tocando rede é bug.
+_MODULOS_COM_REDE = {"embeddings.py", "llm.py"}
+
 
 def test_sem_rede():
-    """RNF-19: exceção única é `embeddings.py` (download do modelo, Fase 4)."""
-    outros = [m for m in MODULOS if m.name != "embeddings.py"]
+    """RNF-19: só `embeddings.py` e `llm.py` fazem I/O de rede."""
+    outros = [m for m in MODULOS if m.name not in _MODULOS_COM_REDE]
     problemas = ocorrencias(outros, _REDE)
     assert problemas == [], "I/O de rede encontrado:\n" + "\n".join(problemas)
 

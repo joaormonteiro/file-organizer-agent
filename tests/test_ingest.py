@@ -119,7 +119,7 @@ def test_baixa_confianca_vai_para_inbox(sandbox, conn, caplog):
     linha = db.buscar_por_path(conn, str(destino))
     assert linha["status"] == "inbox"
     # `relatorio.pdf` é documento de texto com nome genérico: o caminho do LLM é
-    # tentado e, sem Ollama, o motivo é exatamente `llm_indisponivel`
+    # tentado e, sem GEMINI_API_KEY, o motivo é exatamente `llm_indisponivel`
     assert linha["motivo"] == Motivo.LLM_INDISPONIVEL.value
     assert linha["confianca"] < sandbox.cfg.confidence_min
 
@@ -263,7 +263,7 @@ def test_dry_run_nao_move(sandbox, conn, caplog):
 
 
 def test_caminho_rapido_sem_llm(sandbox, conn, monkeypatch):
-    """RNF-13: extensão inequívoca é organizada sem invocar o Ollama.
+    """RNF-13: extensão inequívoca é organizada sem invocar o Gemini.
 
     Contar zero chamadas ao LLM não basta: um arquivo mandado para o `_Inbox`
     também não chama o LLM. O teste exige o destino final correto.
@@ -361,11 +361,11 @@ def test_duplicata_registra_duplicado_de(sandbox, conn):
 
 
 # --------------------------------------------------------------------------- #
-# Fase 3 — o pipeline inteiro com o Ollama falso
+# Fase 3 — o pipeline inteiro com o Gemini falso
 # --------------------------------------------------------------------------- #
 
 
-def test_documento_generico_e_organizado_pelo_llm(sandbox, conn, ollama_falso):
+def test_documento_generico_e_organizado_pelo_llm(sandbox, conn, gemini_falso):
     """RF-47 + RF-57 + RF-58: `document.pdf` sai do Downloads renomeado e no lugar certo."""
     from organizer import config
 
@@ -390,14 +390,13 @@ def test_documento_generico_e_organizado_pelo_llm(sandbox, conn, ollama_falso):
     assert linha["texto_amostra"] and "matriz curricular" in linha["texto_amostra"]
 
 
-def test_llm_timeout_esgotado_vai_para_inbox(sandbox, conn, ollama_falso, monkeypatch):
+def test_llm_timeout_esgotado_vai_para_inbox(sandbox, conn, gemini_falso):
     """RF-59: esgotadas as tentativas, o arquivo vai para o `_Inbox` com o motivo certo."""
     from organizer import config
 
-    monkeypatch.setenv("LLM_TIMEOUT", "1")
     config.get_config.cache_clear()
     cfg = config.get_config()
-    ollama_falso.modo("dorme", FAKE_OLLAMA_SONO="20")
+    gemini_falso.modo("dorme")
     origem = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
 
     assert ingest.processar(origem, cfg=cfg, conn=conn) == ingest.EXIT_OK
@@ -407,11 +406,11 @@ def test_llm_timeout_esgotado_vai_para_inbox(sandbox, conn, ollama_falso, monkey
     assert db.buscar_por_path(conn, str(destino))["motivo"] == Motivo.LLM_TIMEOUT.value
 
 
-def test_llm_com_lixo_vai_para_inbox(sandbox, conn, ollama_falso):
+def test_llm_com_lixo_vai_para_inbox(sandbox, conn, gemini_falso):
     """RF-55 nível 5: parser esgotado → `_Inbox` com `llm_parse_error`."""
     from organizer import config
 
-    ollama_falso.modo("lixo")
+    gemini_falso.modo("lixo")
     config.get_config.cache_clear()
     cfg = config.get_config()
     origem = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
