@@ -107,20 +107,26 @@ def test_nome_normal_nao_e_parcial():
     assert not rules.nome_e_parcial("contrato-estagio.pdf")
 
 
-def test_arvore_criada_sob_demanda(tmp_path):
-    """RF-08: a árvore vem de CATEGORIAS e só é criada quando pedimos."""
-    alvo = tmp_path / "Organizado"
-    esperadas = rules.pastas_da_arvore(alvo)
-    assert not alvo.exists(), "listar as pastas não pode criar nada"
+def test_arvore_criada_sob_demanda(sandbox):
+    """RF-08: a árvore vem de CATEGORIAS e só é criada quando pedimos.
 
-    criadas = rules.criar_arvore(alvo)
+    As 5 raízes em si já existem (o sandbox as cria como pastas vazias, como
+    Documents/Pictures/etc. já existem de fábrica no Windows) — o que não pode
+    existir antes da chamada é a subárvore de categorias dentro delas.
+    """
+    cfg = sandbox.cfg
+    esperadas = rules.pastas_da_arvore(cfg)
+    for categoria in rules.CATEGORIAS:
+        assert not sandbox.caminho(categoria).exists(), "listar as pastas não pode criar nada"
+
+    criadas = rules.criar_arvore(cfg)
     assert set(criadas) == set(esperadas)
     for categoria in rules.CATEGORIAS:
-        assert (alvo / Path(categoria)).is_dir()
-    assert (alvo / "_Inbox" / "_Duplicados").is_dir()
-    assert (alvo / "_Inbox" / "_Aguardando").is_dir()
+        assert sandbox.caminho(categoria).is_dir()
+    assert cfg.duplicados_dir.is_dir()
+    assert cfg.aguardando_dir.is_dir()
 
-    rules.criar_arvore(alvo)  # idempotente
+    rules.criar_arvore(cfg)  # idempotente
 
 
 def test_nenhuma_pasta_criada_no_import(tmp_path):

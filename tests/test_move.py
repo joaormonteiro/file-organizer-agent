@@ -131,7 +131,7 @@ def test_descartar_reserva_so_apaga_arquivo_de_zero_byte(sandbox, conn):
 
 def test_colisao_identica(sandbox, conn):
     """RF-22: destino idêntico vira duplicata no `_Inbox/_Duplicados`, nada é apagado."""
-    rules.criar_arvore(sandbox.target, sandbox.cfg.inbox_dirname)
+    rules.criar_arvore(sandbox.cfg)
     conteudo = factories.bytes_deterministicos(2048)
     ja_existente = factories.criar(sandbox.caminho(rules.CAT_INSTALADORES), "setup.exe", conteudo)
     origem = factories.criar(sandbox.downloads, "setup.exe", conteudo)
@@ -150,7 +150,7 @@ def test_colisao_identica(sandbox, conn):
 
 def test_colisao_diferente(sandbox, conn):
     """RF-22 e RF-23: conteúdo diferente ganha sufixo `-2`, nunca ` (2)`."""
-    rules.criar_arvore(sandbox.target, sandbox.cfg.inbox_dirname)
+    rules.criar_arvore(sandbox.cfg)
     factories.criar(
         sandbox.caminho(rules.CAT_INSTALADORES), "setup.exe", factories.bytes_deterministicos(64, 1)
     )
@@ -172,7 +172,7 @@ def test_colisao_diferente(sandbox, conn):
 def test_colisao_esgotada(sandbox, conn, monkeypatch):
     """RF-22: esgotados os candidatos, o arquivo vai para o `_Inbox`."""
     monkeypatch.setattr(paths, "MAX_CANDIDATOS", 3)
-    rules.criar_arvore(sandbox.target, sandbox.cfg.inbox_dirname)
+    rules.criar_arvore(sandbox.cfg)
     pasta = sandbox.caminho(rules.CAT_INSTALADORES)
     for indice, nome in enumerate(("setup.exe", "setup-2.exe", "setup-3.exe"), start=10):
         factories.criar(pasta, nome, factories.bytes_deterministicos(64, indice))
@@ -187,7 +187,7 @@ def test_colisao_esgotada(sandbox, conn, monkeypatch):
 
 def test_path_muito_longo_cai_no_inbox(sandbox, conn, monkeypatch):
     """RF-21: destino impossível pelo tamanho vai para o `_Inbox`."""
-    monkeypatch.setattr(paths, "MAX_PATH", len(str(sandbox.target)) + 25)
+    monkeypatch.setattr(paths, "MAX_PATH", len(str(sandbox.desktop)) + 25)
     origem = factories.criar(sandbox.downloads, "setup.exe")
     decisao = decisao_para(origem, nome="a" * 120 + ".exe")
 
@@ -343,7 +343,7 @@ def test_erro_de_replace_limpa_reserva_e_marca_falhou(sandbox, conn, monkeypatch
 
 def test_duplicata_incrementa_o_sufixo_dup(sandbox, conn):
     """O segundo duplicado vira `-dup2`, e assim por diante."""
-    rules.criar_arvore(sandbox.target, sandbox.cfg.inbox_dirname)
+    rules.criar_arvore(sandbox.cfg)
     conteudo = factories.bytes_deterministicos(1024)
     factories.criar(sandbox.caminho(rules.CAT_INSTALADORES), "setup.exe", conteudo)
     factories.criar(sandbox.duplicados, "setup-dup1.exe", conteudo)

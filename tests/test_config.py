@@ -12,6 +12,20 @@ from organizer import config
 
 RAIZ_PROJETO = Path(__file__).resolve().parent.parent
 
+#: As 5 raízes de destino — mesma ordem de `config._NOMES_RAIZES`.
+_NOMES_RAIZES = ("DOCUMENTS_ROOT", "PICTURES_ROOT", "VIDEOS_ROOT", "MUSIC_ROOT", "DESKTOP_ROOT")
+
+
+def _raizes_padrao(tmp_path: Path) -> dict[str, Path]:
+    """5 raízes de destino válidas e disjuntas, para testes que não são sobre elas."""
+    return {
+        "DOCUMENTS_ROOT": tmp_path / "Documents",
+        "PICTURES_ROOT": tmp_path / "Pictures",
+        "VIDEOS_ROOT": tmp_path / "Videos",
+        "MUSIC_ROOT": tmp_path / "Music",
+        "DESKTOP_ROOT": tmp_path / "Desktop",
+    }
+
 
 def test_env_example_cobre_todas_as_chaves():
     """RF-02: `.env.example` documenta exatamente os campos do dataclass Config."""
@@ -36,32 +50,44 @@ def test_ambiente_vence_env(tmp_path, monkeypatch, sandbox):
     assert cfg.max_workers == 9  # do arquivo
 
 
-@pytest.mark.parametrize("caso", ["iguais", "target_dentro", "db_dentro", "log_dentro"])
+@pytest.mark.parametrize(
+    "caso",
+    [
+        "iguais",
+        "documents_dentro",
+        "pictures_dentro",
+        "videos_dentro",
+        "music_dentro",
+        "desktop_dentro",
+        "db_dentro",
+        "log_dentro",
+    ],
+)
 def test_recusa_raizes_sobrepostas(tmp_path, monkeypatch, caso):
-    """RF-03: quatro configurações perigosas, todas recusadas com ConfigError."""
+    """RF-03: qualquer uma das 5 raízes (ou DB_PATH/LOG_DIR) sobreposta a
+    DOWNLOADS_DIR é recusada com ConfigError — o mesmo mecanismo de disjunção
+    vale para as 5, não só para a antiga TARGET_ROOT única."""
     downloads = tmp_path / "Downloads"
-    target = tmp_path / "Organizado"
     downloads.mkdir()
-    target.mkdir()
 
-    valores = {
+    valores: dict[str, Path] = {
         "DOWNLOADS_DIR": downloads,
-        "TARGET_ROOT": target,
-        "DB_PATH": target / ".foa" / "index.db",
-        "LOG_DIR": target / ".foa" / "logs",
+        **_raizes_padrao(tmp_path),
+        "DB_PATH": tmp_path / ".foa" / "index.db",
+        "LOG_DIR": tmp_path / ".foa" / "logs",
     }
+    for caminho in _raizes_padrao(tmp_path).values():
+        caminho.mkdir()
+
     if caso == "iguais":
-        valores["TARGET_ROOT"] = downloads
-        valores["DB_PATH"] = downloads / ".foa" / "index.db"
-        valores["LOG_DIR"] = downloads / ".foa" / "logs"
-    elif caso == "target_dentro":
-        valores["TARGET_ROOT"] = downloads / "Organizado"
-        valores["DB_PATH"] = downloads / "Organizado" / ".foa" / "index.db"
-        valores["LOG_DIR"] = downloads / "Organizado" / ".foa" / "logs"
+        valores["DOCUMENTS_ROOT"] = downloads
     elif caso == "db_dentro":
         valores["DB_PATH"] = downloads / ".foa" / "index.db"
     elif caso == "log_dentro":
         valores["LOG_DIR"] = downloads / ".foa" / "logs"
+    else:
+        chave = f"{caso.split('_')[0].upper()}_ROOT"
+        valores[chave] = downloads / "Sub"
 
     monkeypatch.delenv(config.VAR_AMBIENTE, raising=False)
     for chave, valor in valores.items():
@@ -73,11 +99,13 @@ def test_recusa_raizes_sobrepostas(tmp_path, monkeypatch, caso):
 
 
 def test_recusa_raiz_fora_do_sandbox_em_modo_teste(tmp_path, monkeypatch):
-    """Barreira 4: com FOA_ENV=test, raiz fora do sandbox é recusada."""
+    """Barreira 4: com FOA_ENV=test, uma única raiz fora do sandbox já é recusada."""
     monkeypatch.setenv(config.VAR_AMBIENTE, "test")
     monkeypatch.setenv(config.VAR_RAIZ_TESTE, str(tmp_path))
     monkeypatch.setenv("DOWNLOADS_DIR", str(tmp_path / "Downloads"))
-    monkeypatch.setenv("TARGET_ROOT", str(Path.home() / "Organizado-que-nao-deve-ser-usado"))
+    for chave, valor in _raizes_padrao(tmp_path).items():
+        monkeypatch.setenv(chave, str(valor))
+    monkeypatch.setenv("DOCUMENTS_ROOT", str(Path.home() / "Documents-que-nao-deve-ser-usado"))
     monkeypatch.setenv("DB_PATH", str(tmp_path / "db" / "index.db"))
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
     with pytest.raises(config.ConfigError):
@@ -85,10 +113,10 @@ def test_recusa_raiz_fora_do_sandbox_em_modo_teste(tmp_path, monkeypatch):
 
 
 def test_raiz_obrigatoria(tmp_path, monkeypatch):
-    """RF-01: sem DOWNLOADS_DIR não há default hardcoded — o agente recusa iniciar."""
+    """RF-01: sem DOWNLOADS_DIR não há default hardcoded — o agente recusa iniciar
+    antes mesmo de checar as 5 raízes de destino (é o primeiro campo montado)."""
     monkeypatch.delenv(config.VAR_AMBIENTE, raising=False)
     monkeypatch.delenv("DOWNLOADS_DIR", raising=False)
-    monkeypatch.setenv("TARGET_ROOT", str(tmp_path / "Organizado"))
     with pytest.raises(config.ConfigError):
         config.montar(tmp_path / "inexistente.env")
 
@@ -103,8 +131,8 @@ def test_cache_e_clear(sandbox):
     assert segundo == primeiro
 
 
-def test_inbox_dentro_do_target(sandbox):
-    assert sandbox.cfg.inbox_dir.parent == sandbox.cfg.target_root
+def test_inbox_dentro_do_desktop_root(sandbox):
+    assert sandbox.cfg.inbox_dir.parent == sandbox.cfg.desktop_root
     assert sandbox.cfg.duplicados_dir.parent == sandbox.cfg.inbox_dir
 
 

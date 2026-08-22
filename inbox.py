@@ -65,7 +65,7 @@ def aprovar(conn, cfg, op_id: int) -> move.ResultadoMove | None:
         return None
 
     decisao = _decisao_de(operacao)
-    rules.criar_arvore(cfg.target_root, cfg.inbox_dirname)
+    rules.criar_arvore(cfg)
     anterior = db.buscar_por_path(conn, str(atual))
     try:
         # a aprovação já foi dada aqui: este move NÃO pode voltar a exigi-la,
@@ -137,10 +137,11 @@ def _tabela(itens, cfg):
     for coluna in ("id", "nome", "destino proposto", "confiança", "motivo"):
         tabela.add_column(coluna, overflow="fold")
     for operacao in itens:
+        categoria = rules.categoria_valida(operacao["categoria"]) or rules.CAT_OUTROS
         tabela.add_row(
             str(operacao["id"]),
             Path(operacao["destino"]).name,
-            str(cfg.target_root / Path(operacao["categoria"] or rules.CAT_OUTROS)),
+            str(rules.raiz_de(cfg, categoria) / Path(categoria)),
             f"{float(operacao['confianca'] or 0):.2f}",
             operacao["erro"] or Motivo.AGUARDANDO_APROVACAO.value,
         )

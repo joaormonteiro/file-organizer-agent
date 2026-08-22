@@ -101,7 +101,7 @@ def pasta_destino(cfg, decisao, ignorar_aprovacao: bool = False) -> Path:
         return cfg.aguardando_dir
     if decisao.para_inbox:
         return cfg.inbox_dir
-    return cfg.target_root / Path(decisao.categoria)
+    return rules.raiz_de(cfg, decisao.categoria) / Path(decisao.categoria)
 
 
 def _nome_duplicado(destino: Path, cfg) -> Path:

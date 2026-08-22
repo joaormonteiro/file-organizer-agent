@@ -103,7 +103,17 @@ def test_sem_paths_hardcoded():
 def test_config_e_a_unica_fonte_de_raizes():
     """RF-01: todo módulo que precisa de uma raiz a recebe de `config`."""
     fonte = (PACOTE / "config.py").read_text(encoding="utf-8")
-    for chave in ("DOWNLOADS_DIR", "TARGET_ROOT", "DB_PATH", "LOG_DIR", "INBOX_DIRNAME"):
+    for chave in (
+        "DOWNLOADS_DIR",
+        "DOCUMENTS_ROOT",
+        "PICTURES_ROOT",
+        "VIDEOS_ROOT",
+        "MUSIC_ROOT",
+        "DESKTOP_ROOT",
+        "DB_PATH",
+        "LOG_DIR",
+        "INBOX_DIRNAME",
+    ):
         assert chave in fonte
 
 

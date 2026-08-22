@@ -99,7 +99,7 @@ class Watcher:
         nome = caminho.name
         if rules.nome_e_parcial(nome):
             return Motivo.PARCIAL.value
-        for raiz in (self.cfg.target_root, self.cfg.db_path.parent, self.cfg.log_dir):
+        for raiz in (*self.cfg.raizes, self.cfg.db_path.parent, self.cfg.log_dir):
             if paths.is_subpath(caminho, raiz):
                 return Motivo.DENTRO_DO_TARGET.value
         if not self.cfg.watch_recursive and caminho.parent != Path(self.cfg.downloads_dir):
@@ -230,7 +230,7 @@ class Watcher:
 
     def preparar(self) -> None:
         """Recuperação e limpeza que precedem qualquer evento (RF-44)."""
-        rules.criar_arvore(self.cfg.target_root, self.cfg.inbox_dirname)
+        rules.criar_arvore(self.cfg)
         contadores = move.recover_incomplete(self.conn, self.cfg)
         queue.limpar_locks_orfaos(self.conn)
         _logger.info("recuperação de startup: %s", contadores)

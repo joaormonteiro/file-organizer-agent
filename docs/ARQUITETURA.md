@@ -136,14 +136,16 @@ de `python-dotenv`) sobreposto por variáveis de ambiente reais (env vence `.env
 Expõe um `@dataclass(frozen=True) Config` e `get_config()` com cache.
 Faz **validação fail-fast** em duas partes, porque as raízes não são todas do mesmo
 tipo (corrigido em 2026-08-02 — a formulação anterior era autocontraditória):
-- `paths.assert_disjoint(downloads_dir, target_root)` — a raiz vigiada e a raiz de
-  destino têm de ser mundos separados (é o que impede o loop infinito);
+- `paths.assert_disjoint(downloads_dir, raiz)` para cada uma das 5 raízes de destino
+  (`documents_root`, `pictures_root`, `videos_root`, `music_root`, `desktop_root`) —
+  a raiz vigiada e as raízes de destino têm de ser mundos separados (é o que impede
+  o loop infinito);
 - `is_subpath(alvo, downloads_dir)` recusado para `db_path`, `log_dir`, `inbox_dir` e
-  `target_root` — nenhum estado do agente pode morar dentro da pasta vigiada.
+  cada uma das 5 raízes — nenhum estado do agente pode morar dentro da pasta vigiada.
 
-`DB_PATH` e `LOG_DIR` ficam **dentro** de `TARGET_ROOT` por design (`<TARGET_ROOT>/.foa/`,
-seção 4), então incluí-los num `assert_disjoint` único faria a validação falhar sempre,
-com qualquer configuração válida.
+`DB_PATH` e `LOG_DIR` ficam **fora** das 5 raízes por design (`%LOCALAPPDATA%\FileOrganizerAgent`,
+seção 4) — desde a troca de `TARGET_ROOT` único para 5 raízes, não fazia mais sentido
+escondê-los dentro de uma delas.
 Nenhum caminho é hardcoded em nenhum outro módulo — regra auditável por grep.
 Importa: `os`, `pathlib`, `dataclasses`, `organizer.paths`.
 
@@ -189,9 +191,9 @@ Encapsula backoff e teto de tentativas.
 motivo='protegido'`), `.docx` via `python-docx`, `.txt/.md/.csv` via leitura direta
 com cascata de encoding (utf-8 → utf-8-sig → cp1252 → latin-1). Nunca executa nada.
 
-**(K) `llm.py`** — `disponivel() -> bool` (cache TTL em `config_kv`),
-`classificar(contexto) -> RespostaLLM | None`. Encapsula subprocess, prompt,
-parsing tolerante, timeout e retry (seção 9).
+**(K) `llm.py`** — `disponivel() -> bool` (checagem O(1) de `GEMINI_API_KEY`),
+`classificar(contexto) -> RespostaLLM | None`. Encapsula a chamada HTTP à API do
+Gemini, prompt, `responseSchema`, parsing tolerante, timeout e retry (seção 9).
 
 **(L) `classify.py`** — `classificar(path) -> Decisao(categoria, nome_final,
 confianca, via, motivo)`. Aplica `rules` → decide se escala para `llm` → funde
@@ -231,11 +233,17 @@ e rerank opcional via `llm`. `main()` é a CLI com `rich`.
 
 ```ini
 # --- raizes (TUDO relocavel: e isto que torna o sandbox de teste possivel) ---
+# 5 raizes de destino, uma por pasta padrao do Windows, em vez de uma unica
+# arvore "Organizado" a parte (trocado em 08/2026 - ver secao 9-bis abaixo)
 DOWNLOADS_DIR=C:\Users\joaor\Downloads
-TARGET_ROOT=C:\Users\joaor\Organizado
-INBOX_DIRNAME=_Inbox                   # resolvido como TARGET_ROOT\_Inbox
-DB_PATH=C:\Users\joaor\Organizado\.foa\index.db
-LOG_DIR=C:\Users\joaor\Organizado\.foa\logs
+DOCUMENTS_ROOT=C:\Users\joaor\Documents
+PICTURES_ROOT=C:\Users\joaor\OneDrive\Pictures
+VIDEOS_ROOT=C:\Users\joaor\Videos
+MUSIC_ROOT=C:\Users\joaor\Music
+DESKTOP_ROOT=C:\Users\joaor\OneDrive\Desktop  # tambem onde mora o _Inbox
+INBOX_DIRNAME=_Inbox                   # resolvido como DESKTOP_ROOT\_Inbox
+DB_PATH=                               # vazio = %LOCALAPPDATA%\FileOrganizerAgent\index.db
+LOG_DIR=                               # vazio = %LOCALAPPDATA%\FileOrganizerAgent\logs
 
 # --- comportamento ---
 MODE=auto                 # auto | interactive
@@ -274,36 +282,60 @@ EMBEDDING_MODEL=minishlab/potion-multilingual-128M
 SEARCH_RERANK_LLM=0
 ```
 
-⚠ **DIVERGÊNCIA 2 (árvore de pastas).** A spec espalha as pastas-alvo pela raiz do
-perfil (`C:\Users\joaor\Documentos`, `...\Imagens`, `...\Musica`). Verificado no
-ambiente real: essas pastas **não existem** — o perfil tem `Documents`, `Pictures`,
-`Music`, `Videos` (nomes em inglês no disco, localizados só na UI). Seguir a spec
-literalmente criaria pastas duplicadas e confusas ao lado das reais.
+⚠ **DIVERGÊNCIA 2 (árvore de pastas) — revisada em 08/2026.** A spec espalha as
+pastas-alvo pela raiz do perfil (`C:\Users\joaor\Documentos`, `...\Imagens`,
+`...\Musica`). Verificado no ambiente real: essas pastas **não existem** — o perfil
+tem `Documents`, `Pictures`, `Music`, `Videos` (nomes em inglês no disco, localizados
+só na UI).
 
-Decisão: **uma única raiz `TARGET_ROOT`** (padrão `C:\Users\joaor\Organizado`) contendo
-toda a subárvore da spec, inclusive `Imagens/`, `Videos/`, `Musica/`, `Softwares/` e
-`_Inbox/`. Ganhos: (a) uma variável relocaliza tudo para o sandbox de teste;
-(b) `assert_disjoint` fica trivial; (c) não polui pastas de sistema.
-Quem quiser o layout literal da spec define `TARGET_ROOT=C:\Users\joaor` — a subárvore
-relativa é idêntica. A subárvore canônica vive em `rules.CATEGORIAS`.
+Decisão original (até 08/2026): uma única raiz `TARGET_ROOT` (`C:\Users\joaor\Organizado`)
+contendo toda a subárvore da spec. Funcionava, mas criava uma segunda árvore de
+pastas ao lado das pastas padrão do Windows que o usuário já usa todo dia — o
+"Organizado" virava mais um lugar para lembrar de olhar, em vez de organizar os
+lugares que ele já olha.
 
-Árvore criada sob `TARGET_ROOT` (criada sob demanda, nunca no import):
+**Decisão atual: 5 raízes de destino, uma por pasta padrão do Windows.** Cada ramo
+de topo de `rules.CATEGORIAS` mapeia para uma raiz via `rules.RAIZ_POR_TOPO`:
+
+| Ramo de topo | Raiz (`.env`) | Config |
+|---|---|---|
+| `Documentos/*` | `DOCUMENTS_ROOT` | `cfg.documents_root` |
+| `Imagens/*` | `PICTURES_ROOT` | `cfg.pictures_root` |
+| `Videos` | `VIDEOS_ROOT` | `cfg.videos_root` |
+| `Musica` | `MUSIC_ROOT` | `cfg.music_root` |
+| `Softwares/*` | `DESKTOP_ROOT` | `cfg.desktop_root` |
+
+`_Inbox/` também vive em `DESKTOP_ROOT` — é a raiz que o usuário olha com mais
+frequência, então é onde a fila de revisão fica visível sem precisar procurar.
+`DB_PATH`/`LOG_DIR` saíram de dentro de qualquer raiz de destino e foram para
+`%LOCALAPPDATA%\FileOrganizerAgent\` — não fazia sentido escondê-los dentro de uma
+das 5 quando não há mais uma raiz única e óbvia para hospedá-los.
+Ganhos que a raiz única também tinha e continuam valendo: 5 variáveis relocalizam
+tudo para o sandbox de teste; `assert_disjoint` continua trivial (só roda 5x em vez
+de 1x); nenhuma pasta de sistema é poluída. A subárvore canônica *dentro* de cada
+raiz continua idêntica e vive em `rules.CATEGORIAS`.
+
+Árvore criada (sob demanda, nunca no import — `rules.criar_arvore(cfg)`):
 
 ```
-<TARGET_ROOT>/
-├── Documentos/Academico/UNIFESP/{Matrizes-Curriculares,Comprovantes,Trabalhos,Horarios}
-├── Documentos/Academico/Certificados
-├── Documentos/Profissional/{Eyeconnect,EfficienceCo,Contratos}
-├── Documentos/Financeiro/{Extratos,Notas-Fiscais}
-├── Documentos/Pessoal/{Documentos-RG-CPF,Outros}
+<DOCUMENTS_ROOT>/
+├── Academico/UNIFESP/{Matrizes-Curriculares,Comprovantes,Trabalhos,Horarios}
+├── Academico/Certificados
+├── Profissional/{Eyeconnect,EfficienceCo,Contratos}
+├── Financeiro/{Extratos,Notas-Fiscais}
+└── Pessoal/{Documentos-RG-CPF,Outros}
+
+<PICTURES_ROOT>/Imagens/{Screenshots,Fotos}
+<VIDEOS_ROOT>/Videos/
+<MUSIC_ROOT>/Musica/
+
+<DESKTOP_ROOT>/
 ├── Softwares/{Instaladores,Portateis}
-├── Imagens/{Screenshots,Fotos}
-├── Videos/
-├── Musica/
 ├── _Inbox/                 <- quarentena (confianca baixa)
 ├── _Inbox/_Duplicados/     <- colisao com conteudo identico
-├── _Inbox/_Aguardando/     <- modo interativo, aguardando aprovacao
-└── .foa/{index.db,logs/}   <- estado do agente
+└── _Inbox/_Aguardando/     <- modo interativo, aguardando aprovacao
+
+%LOCALAPPDATA%\FileOrganizerAgent\{index.db,logs/}   <- estado do agente
 ```
 
 ---
@@ -377,7 +409,7 @@ Descartar imediatamente, sem sequer enfileirar:
 - nomes começando com `~$` (locks do Office) ou `.`, ou terminando em `~`
 - **diretórios** (Fases 1–5 não movem pastas — não-objetivo explícito; o Downloads real
   tem 26 subpastas do usuário que devem permanecer intactas)
-- qualquer caminho dentro de `TARGET_ROOT` ou de `.foa/`
+- qualquer caminho dentro de uma das 5 raízes de destino ou de `%LOCALAPPDATA%\FileOrganizerAgent\`
 
 **Camada 2 — probe de handle exclusivo (autoritativo).**
 `ctypes.windll.kernel32.CreateFileW(long_path(p), GENERIC_READ, dwShareMode=0,
@@ -722,9 +754,13 @@ independentes, em profundidade:
 pytest:
 ```
 sandbox/
-├── Downloads/                    -> DOWNLOADS_DIR
-├── Organizado/<arvore completa>  -> TARGET_ROOT
-└── Organizado/.foa/index.db      -> DB_PATH
+├── Downloads/   -> DOWNLOADS_DIR
+├── Documents/   -> DOCUMENTS_ROOT
+├── Pictures/    -> PICTURES_ROOT
+├── Videos/      -> VIDEOS_ROOT
+├── Music/       -> MUSIC_ROOT
+├── Desktop/     -> DESKTOP_ROOT (também onde a árvore de _Inbox nasce)
+└── .foa/index.db -> DB_PATH
 ```
 `monkeypatch.setenv` para todas as chaves + `config.get_config.cache_clear()`.
 Nenhum teste toca `%USERPROFILE%`.
@@ -736,9 +772,10 @@ qualquer argumento estiver fora de `tmp_path`. Se um bug apontar para o Download
 o teste explode em vez de mover o arquivo do usuário.
 
 **Barreira 4 — guarda em produção.** `config.validar()` recusa iniciar se
-`DOWNLOADS_DIR == TARGET_ROOT`, se um for subpasta do outro, ou se `DB_PATH`/`LOG_DIR`
-estiverem dentro de `DOWNLOADS_DIR`. Adicionalmente, `FOA_ENV=test` (definido pelo
-`conftest`) faz o `config` recusar qualquer raiz fora do `tmp_path` da sessão.
+`DOWNLOADS_DIR` for igual a, ou subpasta de, qualquer uma das 5 raízes de destino
+(ou vice-versa), ou se `DB_PATH`/`LOG_DIR` estiverem dentro de `DOWNLOADS_DIR`.
+Adicionalmente, `FOA_ENV=test` (definido pelo `conftest`) faz o `config` recusar
+qualquer raiz fora do `tmp_path` da sessão.
 
 **Fixtures sintéticas (`tests/factories.py`)** — nada é copiado do Downloads real:
 - PDF mínimo válido: bytes literais de um PDF de 1 página com texto conhecido
@@ -789,9 +826,9 @@ notificação é conveniência, não mecanismo.
 ## 16. Riscos endereçados
 
 **R1 — Loop infinito (pasta-alvo dentro do Downloads).** Três defesas:
-(a) `config.validar()` recusa iniciar se `TARGET_ROOT`, `INBOX_DIR`, `DB_PATH` ou
-`LOG_DIR` forem subpasta de `DOWNLOADS_DIR` (ou vice-versa);
-(b) `ingest` descarta qualquer path com `is_subpath(TARGET_ROOT)`;
+(a) `config.validar()` recusa iniciar se qualquer uma das 5 raízes, `INBOX_DIR`,
+`DB_PATH` ou `LOG_DIR` forem subpasta de `DOWNLOADS_DIR` (ou vice-versa);
+(b) `ingest` descarta qualquer path com `is_subpath` de uma das 5 raízes (`cfg.raizes`);
 (c) o `_Inbox` **nunca** é observado pelo watchdog — só `DOWNLOADS_DIR` é.
 Um path já presente em `arquivos` é ignorado, quebrando qualquer ciclo residual.
 

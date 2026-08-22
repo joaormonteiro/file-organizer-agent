@@ -50,7 +50,7 @@ def deve_ignorar(caminho: Path, cfg) -> str | None:
         return Motivo.DIRETORIO.value
     if rules.nome_e_parcial(caminho.name):
         return Motivo.PARCIAL.value
-    for raiz in (cfg.target_root, cfg.db_path.parent, cfg.log_dir):
+    for raiz in (*cfg.raizes, cfg.db_path.parent, cfg.log_dir):
         if paths.is_subpath(caminho, raiz):
             return Motivo.DENTRO_DO_TARGET.value
     return None
@@ -195,7 +195,7 @@ def _processar(conn, cfg, origem: Path, motivo_origem, intervalo_cpu: float) -> 
         )
 
     if not cfg.dry_run:
-        rules.criar_arvore(cfg.target_root, cfg.inbox_dirname)
+        rules.criar_arvore(cfg)
 
     resultado = move.executar(conn, cfg, decisao)
 

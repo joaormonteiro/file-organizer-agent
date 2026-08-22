@@ -26,7 +26,7 @@ CONF_DESCONHECIDO = 0.30
 
 
 # --------------------------------------------------------------------------- #
-# Categorias canônicas (subárvore relativa a TARGET_ROOT)
+# Categorias canônicas (subárvore relativa à raiz de destino — ver RAIZ_POR_TOPO)
 # --------------------------------------------------------------------------- #
 
 CAT_MATRIZES = "Documentos/Academico/UNIFESP/Matrizes-Curriculares"
@@ -350,22 +350,47 @@ def nome_e_parcial(nome: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Roteamento categoria -> raiz de destino (5 pastas padrão do Windows)
+# --------------------------------------------------------------------------- #
+
+#: Segmento de topo da categoria -> campo do `Config` que guarda a raiz de
+#: destino correspondente. Fonte única: mudar onde uma família de categoria
+#: é organizada é mudar só esta tabela.
+RAIZ_POR_TOPO: dict[str, str] = {
+    "Documentos": "documents_root",
+    "Imagens": "pictures_root",
+    "Videos": "videos_root",
+    "Musica": "music_root",
+    "Softwares": "desktop_root",
+}
+
+
+def campo_raiz(categoria: str) -> str:
+    """Nome do campo do `Config` que guarda a raiz de destino desta categoria."""
+    topo = categoria.replace("\\", "/").strip("/").split("/")[0]
+    return RAIZ_POR_TOPO[topo]
+
+
+def raiz_de(cfg, categoria: str) -> Path:
+    """Qual das 5 raízes de destino recebe esta categoria."""
+    return getattr(cfg, campo_raiz(categoria))
+
+
+# --------------------------------------------------------------------------- #
 # Criação da árvore (sob demanda — nunca no import, RF-08)
 # --------------------------------------------------------------------------- #
 
 
-def pastas_da_arvore(target_root: Path | str, inbox_dirname: str = "_Inbox") -> list[Path]:
+def pastas_da_arvore(cfg) -> list[Path]:
     """Lista, sem criar nada, todas as pastas que compõem a árvore de destino."""
-    raiz = Path(target_root)
-    pastas = [raiz / Path(c) for c in CATEGORIAS]
-    inbox = raiz / inbox_dirname
-    pastas.extend([inbox, inbox / "_Duplicados", inbox / "_Aguardando"])
+    pastas = [raiz_de(cfg, c) / Path(c) for c in CATEGORIAS]
+    pastas.extend([cfg.inbox_dir, cfg.duplicados_dir, cfg.aguardando_dir])
     return pastas
 
 
-def criar_arvore(target_root: Path | str, inbox_dirname: str = "_Inbox") -> list[Path]:
+def criar_arvore(cfg) -> list[Path]:
     """Cria a árvore de destino. Idempotente e chamada só em runtime."""
-    criadas = pastas_da_arvore(target_root, inbox_dirname)
+    criadas = pastas_da_arvore(cfg)
     for pasta in criadas:
         pasta.mkdir(parents=True, exist_ok=True)
     return criadas

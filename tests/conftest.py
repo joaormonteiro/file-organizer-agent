@@ -29,7 +29,7 @@ RAIZ_PROJETO = Path(__file__).resolve().parent.parent
 if str(RAIZ_PROJETO) not in sys.path:
     sys.path.insert(0, str(RAIZ_PROJETO))
 
-from organizer import config, db, guard, log  # noqa: E402
+from organizer import config, db, guard, log, rules  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Barreira 3 — interlock ativo
@@ -114,7 +114,11 @@ class Sandbox:
 
     raiz: Path
     downloads: Path
-    target: Path
+    documents: Path
+    pictures: Path
+    videos: Path
+    music: Path
+    desktop: Path
     db_path: Path
     log_dir: Path
     cfg: config.Config
@@ -128,7 +132,8 @@ class Sandbox:
         return self.cfg.duplicados_dir
 
     def caminho(self, categoria: str) -> Path:
-        return self.target / Path(categoria)
+        """Caminho completo de destino desta categoria, na raiz certa das 5."""
+        return rules.raiz_de(self.cfg, categoria) / Path(categoria)
 
 
 #: Valores padrão do sandbox. Thresholds em 100 para que o guard nunca considere
@@ -165,19 +170,32 @@ _ENV_PADRAO = {
 
 @pytest.fixture
 def sandbox(tmp_path, tmp_path_factory, monkeypatch) -> Sandbox:
-    """Monta o sandbox e aponta toda a configuração para dentro dele."""
+    """Monta o sandbox e aponta toda a configuração para dentro dele.
+
+    5 raízes de destino, uma por pasta padrão do Windows (ARQUITETURA §9),
+    todas dentro do `tmp_path` do teste — nada toca nas pastas reais do SO.
+    """
     raiz = tmp_path / "sandbox"
     downloads = raiz / "Downloads"
-    target = raiz / "Organizado"
-    db_path = target / ".foa" / "index.db"
-    log_dir = target / ".foa" / "logs"
+    documents = raiz / "Documents"
+    pictures = raiz / "Pictures"
+    videos = raiz / "Videos"
+    music = raiz / "Music"
+    desktop = raiz / "Desktop"
+    db_path = raiz / ".foa" / "index.db"
+    log_dir = raiz / ".foa" / "logs"
     downloads.mkdir(parents=True)
-    target.mkdir(parents=True)
+    for pasta in (documents, pictures, videos, music, desktop):
+        pasta.mkdir(parents=True)
 
     monkeypatch.setenv(config.VAR_AMBIENTE, "test")
     monkeypatch.setenv(config.VAR_RAIZ_TESTE, str(Path(tmp_path_factory.getbasetemp()).resolve()))
     monkeypatch.setenv("DOWNLOADS_DIR", str(downloads))
-    monkeypatch.setenv("TARGET_ROOT", str(target))
+    monkeypatch.setenv("DOCUMENTS_ROOT", str(documents))
+    monkeypatch.setenv("PICTURES_ROOT", str(pictures))
+    monkeypatch.setenv("VIDEOS_ROOT", str(videos))
+    monkeypatch.setenv("MUSIC_ROOT", str(music))
+    monkeypatch.setenv("DESKTOP_ROOT", str(desktop))
     monkeypatch.setenv("INBOX_DIRNAME", "_Inbox")
     monkeypatch.setenv("DB_PATH", str(db_path))
     monkeypatch.setenv("LOG_DIR", str(log_dir))
@@ -189,7 +207,7 @@ def sandbox(tmp_path, tmp_path_factory, monkeypatch) -> Sandbox:
     cfg = config.get_config()
     log.configurar(cfg.log_dir)
 
-    yield Sandbox(raiz, downloads, target, db_path, log_dir, cfg)
+    yield Sandbox(raiz, downloads, documents, pictures, videos, music, desktop, db_path, log_dir, cfg)
 
     log.resetar()
     config.get_config.cache_clear()

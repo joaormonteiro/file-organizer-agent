@@ -153,8 +153,8 @@ def test_diretorio_e_ignorado(sandbox, conn):
 
 
 def test_ignora_path_dentro_do_target(sandbox, conn):
-    """RF-31: nada dentro de `TARGET_ROOT` é processado (anti-loop)."""
-    rules.criar_arvore(sandbox.target, sandbox.cfg.inbox_dirname)
+    """RF-31: nada dentro de uma das 5 raízes de destino é processado (anti-loop)."""
+    rules.criar_arvore(sandbox.cfg)
     dentro = factories.criar(sandbox.inbox, "relatorio.pdf")
 
     assert ingest.processar(dentro, cfg=sandbox.cfg, conn=conn) == ingest.EXIT_OK
@@ -429,7 +429,7 @@ def test_deve_ignorar(sandbox):
         == Motivo.PARCIAL.value
     )
     assert (
-        ingest.deve_ignorar(sandbox.target / "x.pdf", sandbox.cfg)
+        ingest.deve_ignorar(sandbox.documents / "x.pdf", sandbox.cfg)
         == Motivo.DENTRO_DO_TARGET.value
     )
     assert ingest.deve_ignorar(sandbox.downloads / "ok.pdf", sandbox.cfg) is None

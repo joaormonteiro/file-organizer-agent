@@ -81,19 +81,24 @@ Depois copie o modelo de configuração e ajuste as raízes:
 copy .env.example .env
 ```
 
-As cinco chaves que importam são as primeiras do arquivo:
+As chaves que importam são as primeiras do arquivo — 5 raízes de destino, uma
+por pasta padrão do Windows, em vez de uma árvore "Organizado" à parte:
 
 ```ini
 DOWNLOADS_DIR=C:\Users\SEU_USUARIO\Downloads
-TARGET_ROOT=C:\Users\SEU_USUARIO\Organizado
+DOCUMENTS_ROOT=C:\Users\SEU_USUARIO\Documents
+PICTURES_ROOT=C:\Users\SEU_USUARIO\Pictures
+VIDEOS_ROOT=C:\Users\SEU_USUARIO\Videos
+MUSIC_ROOT=C:\Users\SEU_USUARIO\Music
+DESKTOP_ROOT=C:\Users\SEU_USUARIO\Desktop
 INBOX_DIRNAME=_Inbox
-DB_PATH=C:\Users\SEU_USUARIO\Organizado\.foa\index.db
-LOG_DIR=C:\Users\SEU_USUARIO\Organizado\.foa\logs
 ```
 
-Não há default para `DOWNLOADS_DIR` nem para `TARGET_ROOT`: o agente **recusa
-iniciar** sem eles, e recusa também se as duas raízes se sobrepuserem. É o que
-impede o loop infinito de reorganizar a própria saída.
+Não há default para `DOWNLOADS_DIR` nem para as 5 raízes: o agente **recusa
+iniciar** sem elas, e recusa também se alguma se sobrepuser ao `DOWNLOADS_DIR`.
+É o que impede o loop infinito de reorganizar a própria saída. `DB_PATH` e
+`LOG_DIR` não precisam de valor — sem eles, banco e log vivem em
+`%LOCALAPPDATA%\FileOrganizerAgent`, fora das 5 raízes.
 
 ### LLM (opcional — Fase 3)
 

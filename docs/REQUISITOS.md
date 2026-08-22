@@ -18,8 +18,10 @@
 *Deve estar pronta e verde antes de qualquer código que toque no filesystem.*
 
 ### RF-01 [BLOQUEANTE]: Toda raiz de caminho vem de configuração, nunca de literal no código.
-`DOWNLOADS_DIR`, `TARGET_ROOT`, `INBOX_DIR`, `DB_PATH` e `LOG_DIR` são lidos por
-`organizer/config.py` a partir de `.env` + variáveis de ambiente (ambiente vence `.env`).
+`DOWNLOADS_DIR`, as 5 raízes de destino (`DOCUMENTS_ROOT`, `PICTURES_ROOT`,
+`VIDEOS_ROOT`, `MUSIC_ROOT`, `DESKTOP_ROOT`), `INBOX_DIR`, `DB_PATH` e `LOG_DIR` são
+lidos por `organizer/config.py` a partir de `.env` + variáveis de ambiente (ambiente
+vence `.env`).
 **V:** `pytest tests/test_isolation.py::test_sem_paths_hardcoded` — varre `organizer/**/*.py`
 e falha se encontrar `Downloads`, `Users` + `joaor`, ou raiz de unidade fora de docstring.
 
@@ -28,9 +30,10 @@ e falha se encontrar `Downloads`, `Users` + `joaor`, ou raiz de unidade fora de 
 chaves do arquivo com os campos do dataclass `Config`.
 
 ### RF-03 [BLOQUEANTE]: `config.validar()` recusa iniciar com raízes sobrepostas.
-Erro fatal se `DOWNLOADS_DIR == TARGET_ROOT`, se um for subpasta do outro, ou se
-`DB_PATH`, `LOG_DIR` ou `INBOX_DIR` estiverem dentro de `DOWNLOADS_DIR`.
-**V:** `pytest tests/test_config.py::test_recusa_raizes_sobrepostas` (4 casos, cada um
+Erro fatal se `DOWNLOADS_DIR` for igual a, ou subpasta de, qualquer uma das 5 raízes
+de destino (ou vice-versa), ou se `DB_PATH`, `LOG_DIR` ou `INBOX_DIR` estiverem
+dentro de `DOWNLOADS_DIR`.
+**V:** `pytest tests/test_config.py::test_recusa_raizes_sobrepostas` (8 casos, cada um
 esperando `ConfigError`).
 
 ### RF-04: `config.get_config()` é cacheado e expõe `cache_clear()` para os testes.
@@ -211,7 +214,7 @@ processamento.
 Debounce de 2 s, mais `em_processamento.path UNIQUE`, mais `pendentes.path UNIQUE`.
 **V:** `pytest tests/test_watch.py::test_evento_duplicado_gera_um_worker`.
 
-### RF-31 [BLOQUEANTE]: Nenhum arquivo dentro de `TARGET_ROOT` é processado (anti-loop).
+### RF-31 [BLOQUEANTE]: Nenhum arquivo dentro de uma das 5 raízes de destino é processado (anti-loop).
 **V:** `pytest tests/test_ingest.py::test_ignora_path_dentro_do_target`.
 
 ### RF-32 [BLOQUEANTE]: O `_Inbox` nunca é observado pelo watchdog.
@@ -556,7 +559,7 @@ tratadas como defeito pelo revisor:
 | # | Spec dizia | Implementação | Onde está justificado |
 |---|---|---|---|
 | 1 | Resource Guard antes do dispatch | Guard roda dentro do worker filho | ARQUITETURA §1 |
-| 2 | Pastas-alvo espalhadas na raiz do perfil | Raiz única `TARGET_ROOT` | ARQUITETURA §4 |
+| 2 | Pastas-alvo espalhadas na raiz do perfil | 5 raízes de destino, uma por pasta padrão do Windows (`DOCUMENTS_ROOT` etc. — raiz única `TARGET_ROOT` até 08/2026) | ARQUITETURA §4 |
 | 3 | "`GPUtil` ou `pynvml`" | `nvidia-ml-py` (wheel oficial; publica o módulo `pynvml`). GPUtil abandonado em 2018, só sdist | ARQUITETURA §6 |
 | 4 | `sentence-transformers` + `all-MiniLM-L6-v2` | FTS5 por padrão; embeddings opcionais via `model2vec` | ARQUITETURA §13 |
 | 5 | Notificação que "pede aprovação" | Toast informativo + fila em `_Inbox/_Aguardando/` + `inbox.py` | ARQUITETURA §15 |

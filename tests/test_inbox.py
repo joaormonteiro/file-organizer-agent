@@ -185,7 +185,7 @@ def test_aprovar_move(sandbox, conn, cfg_interativo):
 
 def test_aprovar_aplica_politica_de_colisao(sandbox, conn, cfg_interativo):
     """RF-76: aprovar não sobrescreve nada — o sufixo `-2` continua valendo."""
-    rules.criar_arvore(sandbox.target, cfg_interativo.inbox_dirname)
+    rules.criar_arvore(cfg_interativo)
     factories.criar(
         sandbox.caminho(rules.CAT_OUTROS), "relatorio.pdf", factories.bytes_deterministicos(64, 1)
     )

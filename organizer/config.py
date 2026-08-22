@@ -47,7 +47,11 @@ class Config:
 
     # raízes
     downloads_dir: Path
-    target_root: Path
+    documents_root: Path
+    pictures_root: Path
+    videos_root: Path
+    music_root: Path
+    desktop_root: Path
     inbox_dirname: str
     db_path: Path
     log_dir: Path
@@ -85,8 +89,9 @@ class Config:
 
     @property
     def inbox_dir(self) -> Path:
-        """Pasta de quarentena, sempre dentro de `TARGET_ROOT`."""
-        return self.target_root / self.inbox_dirname
+        """Pasta de quarentena. Vive em `DESKTOP_ROOT`: é a raiz que o usuário
+        olha com mais frequência, então é onde a fila de revisão fica visível."""
+        return self.desktop_root / self.inbox_dirname
 
     @property
     def duplicados_dir(self) -> Path:
@@ -95,6 +100,17 @@ class Config:
     @property
     def aguardando_dir(self) -> Path:
         return self.inbox_dir / "_Aguardando"
+
+    @property
+    def raizes(self) -> tuple[Path, ...]:
+        """As 5 raízes de destino, na mesma ordem de `_NOMES_RAIZES`."""
+        return (
+            self.documents_root,
+            self.pictures_root,
+            self.videos_root,
+            self.music_root,
+            self.desktop_root,
+        )
 
 
 #: Chaves do `.env`, derivadas do dataclass — fonte única para RF-02.
@@ -175,6 +191,11 @@ def _caminho_obrigatorio(d: dict[str, str], chave: str) -> Path:
     return Path(os.path.expandvars(os.path.expanduser(bruto)))
 
 
+#: Nomes das chaves `.env` na mesma ordem de `Config.raizes` — usado só nas
+#: mensagens de erro de `validar()`.
+_NOMES_RAIZES = ("DOCUMENTS_ROOT", "PICTURES_ROOT", "VIDEOS_ROOT", "MUSIC_ROOT", "DESKTOP_ROOT")
+
+
 # --------------------------------------------------------------------------- #
 # Montagem e validação
 # --------------------------------------------------------------------------- #
@@ -183,17 +204,26 @@ def _caminho_obrigatorio(d: dict[str, str], chave: str) -> Path:
 def montar(arquivo: Path | None = None) -> Config:
     """Constrói o `Config` sem cache (usado pelos testes e por `get_config`)."""
     d = _fonte(arquivo)
-    target_root = _caminho_obrigatorio(d, "TARGET_ROOT")
     inbox_dirname = _texto(d, "INBOX_DIRNAME", "_Inbox")
 
     bruto_db = _texto(d, "DB_PATH", "")
     bruto_log = _texto(d, "LOG_DIR", "")
-    db_path = Path(os.path.expandvars(bruto_db)) if bruto_db else target_root / ".foa" / "index.db"
-    log_dir = Path(os.path.expandvars(bruto_log)) if bruto_log else target_root / ".foa" / "logs"
+    # sem override, banco e logs vivem fora das 5 raízes de destino — não fazia
+    # mais sentido escondê-los dentro de uma delas depois que TARGET_ROOT virou 5
+    padrao_appdata = (
+        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        / "FileOrganizerAgent"
+    )
+    db_path = Path(os.path.expandvars(bruto_db)) if bruto_db else padrao_appdata / "index.db"
+    log_dir = Path(os.path.expandvars(bruto_log)) if bruto_log else padrao_appdata / "logs"
 
     cfg = Config(
         downloads_dir=_caminho_obrigatorio(d, "DOWNLOADS_DIR"),
-        target_root=target_root,
+        documents_root=_caminho_obrigatorio(d, "DOCUMENTS_ROOT"),
+        pictures_root=_caminho_obrigatorio(d, "PICTURES_ROOT"),
+        videos_root=_caminho_obrigatorio(d, "VIDEOS_ROOT"),
+        music_root=_caminho_obrigatorio(d, "MUSIC_ROOT"),
+        desktop_root=_caminho_obrigatorio(d, "DESKTOP_ROOT"),
         inbox_dirname=inbox_dirname,
         db_path=db_path,
         log_dir=log_dir,
@@ -232,9 +262,10 @@ def validar(cfg: Config) -> Config:
     """Recusa configurações que poriam dados do usuário em risco (RF-03).
 
     Regras:
-    - `DOWNLOADS_DIR`, `TARGET_ROOT`, `DB_PATH` e `LOG_DIR` são dois a dois
-      disjuntos (nenhum é igual ou subpasta do outro);
-    - `INBOX_DIR` fica dentro de `TARGET_ROOT` e, portanto, fora do `DOWNLOADS_DIR`;
+    - `DOWNLOADS_DIR` é disjunto de cada uma das 5 raízes de destino
+      (`DOCUMENTS_ROOT`, `PICTURES_ROOT`, `VIDEOS_ROOT`, `MUSIC_ROOT`,
+      `DESKTOP_ROOT`) e de `DB_PATH`/`LOG_DIR`;
+    - `INBOX_DIR` fica dentro de `DESKTOP_ROOT` e, portanto, fora do `DOWNLOADS_DIR`;
     - em `FOA_ENV=test`, toda raiz precisa estar dentro de `FOA_TEST_ROOT`.
     """
     if cfg.mode not in ("auto", "interactive"):
@@ -255,19 +286,21 @@ def validar(cfg: Config) -> Config:
     if "/" in cfg.inbox_dirname or "\\" in cfg.inbox_dirname:
         raise ConfigError("INBOX_DIRNAME é um nome de pasta, não um caminho")
 
-    # a raiz vigiada e a raiz de destino precisam ser mundos separados;
-    # `DB_PATH` e `LOG_DIR` moram de propósito dentro de `TARGET_ROOT` (em `.foa`)
-    try:
-        paths.assert_disjoint(cfg.downloads_dir, cfg.target_root)
-    except paths.CaminhosSobrepostosError as exc:
-        raise ConfigError(str(exc)) from exc
+    # a raiz vigiada e cada uma das 5 raízes de destino precisam ser mundos
+    # separados; `DB_PATH` e `LOG_DIR` moram fora de todas elas, em `%LOCALAPPDATA%`
+    for raiz in cfg.raizes:
+        try:
+            paths.assert_disjoint(cfg.downloads_dir, raiz)
+        except paths.CaminhosSobrepostosError as exc:
+            raise ConfigError(str(exc)) from exc
 
-    for nome, alvo in (
+    checagens = [
         ("DB_PATH", cfg.db_path),
         ("LOG_DIR", cfg.log_dir),
         ("INBOX_DIR", cfg.inbox_dir),
-        ("TARGET_ROOT", cfg.target_root),
-    ):
+        *zip(_NOMES_RAIZES, cfg.raizes),
+    ]
+    for nome, alvo in checagens:
         if paths.is_subpath(alvo, cfg.downloads_dir):
             raise ConfigError(f"{nome} não pode ficar dentro de DOWNLOADS_DIR ({alvo})")
 
@@ -275,12 +308,13 @@ def validar(cfg: Config) -> Config:
         raiz_teste = os.environ.get(VAR_RAIZ_TESTE, "")
         if not raiz_teste:
             raise ConfigError(f"{VAR_AMBIENTE}=test exige {VAR_RAIZ_TESTE}")
-        for nome, alvo in (
+        checagens_teste = [
             ("DOWNLOADS_DIR", cfg.downloads_dir),
-            ("TARGET_ROOT", cfg.target_root),
             ("DB_PATH", cfg.db_path),
             ("LOG_DIR", cfg.log_dir),
-        ):
+            *zip(_NOMES_RAIZES, cfg.raizes),
+        ]
+        for nome, alvo in checagens_teste:
             if not paths.is_subpath(alvo, raiz_teste):
                 raise ConfigError(
                     f"modo de teste: {nome}={alvo} está fora do sandbox {raiz_teste}"

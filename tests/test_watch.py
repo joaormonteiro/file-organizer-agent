@@ -158,7 +158,7 @@ def test_observer_e_agendado_apenas_em_downloads(watcher, sandbox, monkeypatch):
 
 def test_inbox_nao_e_observado(watcher, sandbox, spawn):
     """RF-32: mesmo forçando um evento vindo do `_Inbox`, nada é despachado."""
-    rules.criar_arvore(sandbox.target, sandbox.cfg.inbox_dirname)
+    rules.criar_arvore(sandbox.cfg)
     alvo = factories.criar(sandbox.inbox, "relatorio.pdf")
     assert watcher.despachar(alvo) is False
     assert spawn.chamadas == []
@@ -303,7 +303,7 @@ def test_varredura_de_startup(watcher, sandbox, conn, spawn):
         conn,
         nome_orig="indexado.exe",
         nome_atual="indexado.exe",
-        path=str(sandbox.target / "Softwares" / "Instaladores" / "indexado.exe"),
+        path=str(sandbox.desktop / "Softwares" / "Instaladores" / "indexado.exe"),
         path_orig=str(ja_indexado),
     )
     db.inserir_pendente(conn, str(ja_pendente), db.ts(), Motivo.OCUPADO.value)
