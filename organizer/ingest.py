@@ -38,6 +38,16 @@ EXIT_ERRO = 3
 
 _logger = log.get_logger("ingest")
 
+#: Falha do LLM que vale a pena tentar de novo depois, em vez de mover para o
+#: `_Inbox` agora: servidor sobrecarregado (503), timeout, rede fora do ar.
+#: Chave ausente/inválida (`llm_indisponivel`) fica de fora de propósito —
+#: esperar não resolve um `.env` errado. `queue.excedeu_tentativas` (abaixo)
+#: continua sendo o teto: depois de `MAX_TENTATIVAS`, vai para o `_Inbox` do
+#: mesmo jeito, não fica retentando para sempre.
+_MOTIVOS_LLM_TRANSITORIOS = frozenset(
+    {Motivo.LLM_TEMPORARIAMENTE_INDISPONIVEL.value, Motivo.LLM_TIMEOUT.value}
+)
+
 
 # --------------------------------------------------------------------------- #
 # Filtros baratos (camada 1 da ARQUITETURA §7)
@@ -193,6 +203,15 @@ def _processar(conn, cfg, origem: Path, motivo_origem, intervalo_cpu: float) -> 
             motivo=Motivo.MAX_TENTATIVAS.value,
             nome_final=origem.name,
         )
+    elif decisao.motivo in _MOTIVOS_LLM_TRANSITORIOS:
+        # Gemini fora do ar por um motivo passageiro: não mexe no arquivo,
+        # devolve para a fila e tenta de novo mais tarde — mesmo tratamento que
+        # "PC ocupado" já recebia. Só cai no _Inbox se isso persistir até
+        # esgotar MAX_TENTATIVAS (checado acima, na próxima passada).
+        queue.enfileirar(conn, origem, Motivo(decisao.motivo), cfg)
+        db.liberar_lock(conn, str(origem))
+        log.logar_decisao(_logger, "adiado", origem, motivo=decisao.motivo)
+        return EXIT_ADIADO
 
     if not cfg.dry_run:
         rules.criar_arvore(cfg)

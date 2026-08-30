@@ -390,8 +390,9 @@ def test_documento_generico_e_organizado_pelo_llm(sandbox, conn, gemini_falso):
     assert linha["texto_amostra"] and "matriz curricular" in linha["texto_amostra"]
 
 
-def test_llm_timeout_esgotado_vai_para_inbox(sandbox, conn, gemini_falso):
-    """RF-59: esgotadas as tentativas, o arquivo vai para o `_Inbox` com o motivo certo."""
+def test_llm_timeout_fica_na_fila_sem_mover(sandbox, conn, gemini_falso):
+    """Gemini fora do ar por timeout nao e definitivo: o arquivo fica no
+    Downloads e volta para a fila, em vez de ir para o _Inbox na hora."""
     from organizer import config
 
     config.get_config.cache_clear()
@@ -399,11 +400,54 @@ def test_llm_timeout_esgotado_vai_para_inbox(sandbox, conn, gemini_falso):
     gemini_falso.modo("dorme")
     origem = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
 
+    assert ingest.processar(origem, cfg=cfg, conn=conn) == ingest.EXIT_ADIADO
+
+    assert origem.is_file(), "nao pode ter saido do Downloads ainda"
+    assert not (sandbox.inbox / "document.pdf").exists()
+    pendente = db.pendente_por_path(conn, str(origem))
+    assert pendente is not None
+    assert pendente["motivo"] == Motivo.LLM_TIMEOUT.value
+
+
+def test_llm_timeout_persistente_esgota_tentativas_e_vai_para_inbox(sandbox, conn, gemini_falso):
+    """RF-59 + RF-42: se o timeout continuar acontecendo, nao fica retentando
+    para sempre — depois de MAX_TENTATIVAS, cai no _Inbox como qualquer outro
+    motivo esgotado."""
+    from organizer import config
+
+    config.get_config.cache_clear()
+    cfg = config.get_config()
+    gemini_falso.modo("dorme")
+    origem = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
+    db.inserir_pendente(conn, str(origem), db.ts(), Motivo.LLM_TIMEOUT.value)
+    conn.execute(
+        "UPDATE pendentes SET tentativas = ? WHERE path = ?",
+        (cfg.max_tentativas + 1, str(origem)),
+    )
+
     assert ingest.processar(origem, cfg=cfg, conn=conn) == ingest.EXIT_OK
 
     destino = sandbox.inbox / "document.pdf"
-    assert destino.is_file(), "o arquivo tem de sair do Downloads mesmo assim"
-    assert db.buscar_por_path(conn, str(destino))["motivo"] == Motivo.LLM_TIMEOUT.value
+    assert destino.is_file(), "esgotadas as tentativas, sai do Downloads mesmo assim"
+    assert db.buscar_por_path(conn, str(destino))["motivo"] == Motivo.MAX_TENTATIVAS.value
+
+
+def test_gemini_sobrecarregado_fica_na_fila_sem_mover(sandbox, conn, gemini_falso):
+    """Erro 5xx do lado do Gemini (servidor cheio) e a mesma historia do
+    timeout: nao e definitivo, entao nao vai para o _Inbox agora."""
+    from organizer import config
+
+    config.get_config.cache_clear()
+    cfg = config.get_config()
+    gemini_falso.modo("erro")
+    origem = factories.criar(sandbox.downloads, "document.pdf", factories.pdf_minimo())
+
+    assert ingest.processar(origem, cfg=cfg, conn=conn) == ingest.EXIT_ADIADO
+
+    assert origem.is_file()
+    pendente = db.pendente_por_path(conn, str(origem))
+    assert pendente is not None
+    assert pendente["motivo"] == Motivo.LLM_TEMPORARIAMENTE_INDISPONIVEL.value
 
 
 def test_llm_com_lixo_vai_para_inbox(sandbox, conn, gemini_falso):

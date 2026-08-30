@@ -64,11 +64,19 @@ class RespostaLLM:
 
 
 class Indisponivel(RuntimeError):
-    """A chave, a rede ou a chamada falharam."""
+    """A chave, a rede ou a chamada falharam de um jeito que esperar não resolve
+    (chave ausente/invalida, requisicao malformada) — cai no `_Inbox`."""
+
+
+class IndisponivelTemporario(Indisponivel):
+    """O servidor do Gemini ou a rede falharam de um jeito passageiro (sobrecarga,
+    erro 5xx, DNS/conexao fora do ar) — vale a pena tentar de novo mais tarde em
+    vez de mover para o `_Inbox`. Ver `ingest._MOTIVOS_LLM_TRANSITORIOS`."""
 
 
 class TimeoutLLM(RuntimeError):
-    """O modelo estourou `LLM_TIMEOUT`."""
+    """O modelo estourou `LLM_TIMEOUT` — mesmo tratamento de retry que
+    `IndisponivelTemporario` (não é uma falha permanente)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -141,6 +149,9 @@ trecho: "COMPROVANTE DE MATRICULA Aluno: ... RA ... Situacao: MATRICULADO 2026/1
 
 trecho: "HORARIO DE AULAS Segunda 08:00 Calculo III sala B12; Terca 08:00 Redes ..."
 {"categoria": "Documentos/Academico/UNIFESP/Horarios", "nome_sugerido": "horario-aulas-2026-1", "confianca": 0.9, "motivo": "dias horas e salas das aulas"}
+
+trecho: "Aula 05 - Estruturas de Repeticao Slides desta aula: for, while, do-while ..."
+{"categoria": "Documentos/Academico/UNIFESP/Material-de-Aula", "nome_sugerido": "aula-05-estruturas-de-repeticao", "confianca": 0.85, "motivo": "slide de aula, nao e trabalho entregue nem prova"}
 
 trecho: "EXTRATO DE CONTA CORRENTE Banco ... Saldo anterior ... Lancamentos ..."
 {"categoria": "Documentos/Financeiro/Extratos", "nome_sugerido": "extrato-conta-2026-04", "confianca": 0.9, "motivo": "extrato bancario com lancamentos"}
@@ -437,6 +448,12 @@ def _extrair_texto(corpo_resposta: str) -> str:
     return "".join(p.get("text", "") for p in partes if isinstance(p, dict))
 
 
+#: Códigos HTTP que significam "o servidor está temporariamente indisponível",
+#: não "a chave ou a requisição estão erradas". 429 = rate limit, 503 = servidor
+#: sobrecarregado ("high demand"), 500/502/504 = erro do lado do Google.
+_HTTP_TRANSITORIO = frozenset({429, 500, 502, 503, 504})
+
+
 def executar(cfg, prompt: str, conn=None) -> str:
     """Chama a API do Gemini uma vez e devolve o texto cru da resposta.
 
@@ -470,13 +487,16 @@ def executar(cfg, prompt: str, conn=None) -> str:
             bruto = resposta.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detalhe = exc.read().decode("utf-8", errors="replace")[:200]
+        if exc.code in _HTTP_TRANSITORIO:
+            raise IndisponivelTemporario(f"gemini respondeu {exc.code}: {detalhe}") from exc
         raise Indisponivel(f"gemini respondeu {exc.code}: {detalhe}") from exc
     except TimeoutError as exc:
         raise TimeoutLLM(f"gemini excedeu {cfg.llm_timeout}s") from exc
     except urllib.error.URLError as exc:
-        raise Indisponivel(str(exc.reason)) from exc
+        # DNS/conexao fora do ar: mesma classe do 5xx, quase certo que resolve sozinho
+        raise IndisponivelTemporario(str(exc.reason)) from exc
     except OSError as exc:
-        raise Indisponivel(str(exc)) from exc
+        raise IndisponivelTemporario(str(exc)) from exc
 
     return _extrair_texto(bruto)
 
@@ -490,7 +510,10 @@ def classificar(origem: Path, cfg, texto: str | None = None, conn=None) -> Respo
     """Classifica um arquivo por conteúdo. `None` quando não deu — nunca levanta.
 
     Cascata completa: chamada, parsing tolerante e **um** retry com prompt
-    encurtado (RF-55). Falhou tudo → `None`, e o chamador manda para o `_Inbox`.
+    encurtado (RF-55). Falhou tudo → `None`; o chamador decide o destino pelo
+    `motivo` (`ingest._MOTIVOS_LLM_TRANSITORIOS` manda de volta para a fila em
+    vez de mover para o `_Inbox` — timeout e indisponibilidade passageira do
+    servidor não são erro definitivo, chave ausente/inválida é).
     """
     alvo = Path(origem)
     if not disponivel(cfg, conn):
@@ -508,6 +531,10 @@ def classificar(origem: Path, cfg, texto: str | None = None, conn=None) -> Respo
                 return None
             prompt = prompt_de_retry(prompt)
             continue
+        except IndisponivelTemporario as exc:
+            _logger.warning("gemini temporariamente indisponível: %s", exc)
+            _motivo_da_falha[alvo] = Motivo.LLM_TEMPORARIAMENTE_INDISPONIVEL
+            return None
         except Indisponivel as exc:
             _logger.warning("gemini indisponível durante a chamada: %s", exc)
             _motivo_da_falha[alvo] = Motivo.LLM_INDISPONIVEL

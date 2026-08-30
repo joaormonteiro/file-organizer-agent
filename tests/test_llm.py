@@ -392,22 +392,33 @@ def test_executar_levanta_timeout(cfg, gemini_falso):
 # --------------------------------------------------------------------------- #
 
 
-def test_erro_http_vira_indisponivel(cfg, alvo, gemini_falso):
+def test_erro_5xx_vira_temporariamente_indisponivel(cfg, alvo, gemini_falso):
+    """Erro do lado do servidor (500/503/...) nao e definitivo: motivo distinto
+    de llm_indisponivel, para o chamador (ingest) saber que vale a pena
+    devolver para a fila em vez de mandar direto para o _Inbox."""
     gemini_falso.modo("erro")
+    with pytest.raises(llm.IndisponivelTemporario):
+        llm.executar(cfg, "prompt qualquer")
+    assert llm.classificar(alvo, cfg) is None
+    assert llm.motivo_da_falha(alvo, cfg) == Motivo.LLM_TEMPORARIAMENTE_INDISPONIVEL
+
+
+def test_chave_invalida_vira_indisponivel(cfg, alvo, gemini_falso):
+    """401 (chave errada) e configuracao, nao rede/servidor: esperar nao
+    resolve, entao continua como llm_indisponivel (nao temporario)."""
+    gemini_falso.modo("chave_invalida")
+    with pytest.raises(llm.Indisponivel) as excinfo:
+        llm.executar(cfg, "prompt qualquer")
+    assert not isinstance(excinfo.value, llm.IndisponivelTemporario)
     assert llm.classificar(alvo, cfg) is None
     assert llm.motivo_da_falha(alvo, cfg) == Motivo.LLM_INDISPONIVEL
 
 
-def test_chave_invalida_vira_indisponivel(cfg, gemini_falso):
-    gemini_falso.modo("chave_invalida")
-    with pytest.raises(llm.Indisponivel):
-        llm.executar(cfg, "prompt qualquer")
-
-
-def test_sem_rede_vira_indisponivel(cfg, gemini_falso):
-    """Internet fora do ar (DNS, sem rota) vira `Indisponivel`, não exceção crua."""
+def test_sem_rede_vira_temporariamente_indisponivel(cfg, gemini_falso):
+    """Internet fora do ar (DNS, sem rota) e passageira, nao configuracao —
+    vira `IndisponivelTemporario`, não exceção crua."""
     gemini_falso.modo("sem_rede")
-    with pytest.raises(llm.Indisponivel):
+    with pytest.raises(llm.IndisponivelTemporario):
         llm.executar(cfg, "prompt qualquer")
 
 

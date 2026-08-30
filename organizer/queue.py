@@ -47,6 +47,7 @@ class Motivo(str, Enum):
     DENTRO_DO_TARGET = "dentro_do_target"
     BAIXA_CONFIANCA = "baixa_confianca"
     LLM_INDISPONIVEL = "llm_indisponivel"
+    LLM_TEMPORARIAMENTE_INDISPONIVEL = "llm_temporariamente_indisponivel"
     LLM_TIMEOUT = "llm_timeout"
     LLM_PARSE_ERROR = "llm_parse_error"
     LLM_SEM_CORROBORACAO = "llm_sem_corroboracao"
@@ -76,6 +77,10 @@ BASE_POR_MOTIVO: dict[Motivo, int] = {
     Motivo.LOCK_OCUPADO: RETRY_CURTO_MINUTOS,
     Motivo.CROSS_VOLUME: 30,
     Motivo.PERMISSAO: 30,
+    # servidor do Gemini sobrecarregado (503) ou rede fora do ar: mesma cadência
+    # curta do "limite de workers" — o backoff exponencial de `calcular_backoff`
+    # já evita martelar a API se continuar assim.
+    Motivo.LLM_TEMPORARIAMENTE_INDISPONIVEL: RETRY_CURTO_MINUTOS,
     Motivo.LLM_TIMEOUT: 30,
     Motivo.ERRO_INESPERADO: 30,
     # recuperado no startup: vence imediatamente, o loop idle pega na primeira passada
