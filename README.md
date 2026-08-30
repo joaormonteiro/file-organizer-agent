@@ -5,8 +5,8 @@ file, moves it into an organized tree and indexes everything in a searchable
 SQLite database.
 
 **Guiding principle: zero RAM at idle.** Exactly one process stays alive (the
-watcher, ~5 MB, 0% CPU). Everything expensive — `psutil`, NVML, `pdfplumber`,
-`python-docx`, the call to Gemini — only exists for the lifetime of a single
+watcher, ~5 MB, 0% CPU). Everything expensive (`psutil`, NVML, `pdfplumber`,
+`python-docx`, the call to Gemini) only exists for the lifetime of a single
 event.
 
 Reference documents: [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) (technical
@@ -26,43 +26,44 @@ Both are in Portuguese.
 | 4 | Search: FTS5 + optional embeddings (`model2vec`) | **done** |
 | 5 | Notifications, interactive mode and `_Inbox` dashboard | **done** |
 
-**Project complete and approved in final audit** — all 5 phases implemented,
+**Project complete and approved in final audit.** All 5 phases implemented,
 562 tests, 96% coverage (100% in `paths.py`, `naming.py`, `move.py`, `guard.py`).
 No blocking items open.
 
-With Phases 0–2, a downloaded file already makes its own way to the right folder.
-When classification by extension isn't enough, the file goes to `_Inbox/` — the
-safety net — instead of rotting in the Downloads folder.
+With Phases 0 to 2, a downloaded file already makes its own way to the right
+folder. When classification by extension isn't enough, the file goes to
+`_Inbox/`, the safety net, instead of rotting in the Downloads folder.
 
-### Phase 3 — Ollama → Gemini
+### Phase 3: Ollama to Gemini
 
 Until 08/2026, Phase 3 ran `phi3:mini` (3.8B) locally via `ollama run` as a
 subprocess. It worked, but coverage was low: the model tended to collapse onto a
 dominant category from the few-shot prompt whenever the text had no obvious
-keyword — a limitation of the model, not the prompt. In a validation run with 8
-real ambiguous documents, only 2 were classified (both correct); the other 6
-fell into `_Inbox` for lack of lexical corroboration (`classify.decisao_corroborada`).
+keyword, a limitation of the model rather than the prompt. In a validation run
+with 8 real ambiguous documents, only 2 were classified (both correct); the other
+6 fell into `_Inbox` for lack of lexical corroboration
+(`classify.decisao_corroborada`).
 
 The LLM boundary (`organizer/llm.py`) was switched to call the Gemini API over
 HTTP (`urllib`, no new dependency) instead of a local binary. Direct gains from
 the switch:
 
 - **`responseSchema` with a closed `enum`**: the API is instructed to return
-  only one of the canonical categories — the whole class of "invented category"
+  only one of the canonical categories, so the whole class of "invented category"
   errors, previously caught only later in validation, is now much rarer at the
   source.
 - No local VRAM contention: the Resource Guard thresholds went back to the
-  original spec values (`THRESHOLD_GPU=60`, `THRESHOLD_VRAM=70`) — a loaded
-  `phi3:mini` fought for VRAM with games/editing on a laptop GPU; the API
+  original spec values (`THRESHOLD_GPU=60`, `THRESHOLD_VRAM=70`). A loaded
+  `phi3:mini` fought for VRAM with games and editing on a laptop GPU; the API
   doesn't.
 - No install, no model download: just a `GEMINI_API_KEY` in `.env`.
 
 The safety lock (`decisao_corroborada`) is still active and unchanged: an LLM
 decision is only accepted if a keyword from the chosen category appears in the
-text or the file name — without that, confidence stays pinned at 0.60 and the
-file goes to `_Inbox`. **Always safe** (nothing is moved to the wrong place, the
-worst case is `_Inbox`); coverage is expected to rise with a larger model and
-the closed `enum`, but this hasn't yet been validated against real traffic —
+text or the file name. Without that, confidence stays pinned at 0.60 and the file
+goes to `_Inbox`. **Always safe** (nothing is moved to the wrong place, the worst
+case is `_Inbox`); coverage is expected to rise with a larger model and the
+closed `enum`, but this hasn't yet been validated against real traffic, so it is
 worth watching the first days of use before trusting it blindly.
 
 ---
@@ -86,8 +87,8 @@ Then copy the config template and adjust the roots:
 copy .env.example .env
 ```
 
-The keys that matter are the first ones in the file — 5 destination roots, one
-per standard Windows folder, instead of a separate "Organized" tree:
+The keys that matter are the first ones in the file: 5 destination roots, one
+per standard Windows folder, instead of a separate "Organized" tree.
 
 ```ini
 DOWNLOADS_DIR=C:\Users\YOUR_USER\Downloads
@@ -102,10 +103,10 @@ INBOX_DIRNAME=_Inbox
 There is no default for `DOWNLOADS_DIR` or the 5 roots: the agent **refuses to
 start** without them, and also refuses if any of them overlaps `DOWNLOADS_DIR`.
 That's what prevents the infinite loop of reorganizing its own output. `DB_PATH`
-and `LOG_DIR` don't need a value — without them, the database and log live in
+and `LOG_DIR` don't need a value. Without them, the database and log live in
 `%LOCALAPPDATA%\FileOrganizerAgent`, outside the 5 roots.
 
-### LLM (optional — Phase 3)
+### LLM (optional, Phase 3)
 
 Generate a free key at <https://aistudio.google.com/apikey> and set it in
 `.env`:
@@ -118,29 +119,29 @@ GEMINI_MODEL=gemini-3.6-flash
 Without `GEMINI_API_KEY`, nothing breaks: ambiguous files go to `_Inbox` with
 `motivo=llm_indisponivel` and everything else keeps working.
 
-### Semantic search (optional — Phase 4)
+### Semantic search (optional, Phase 4)
 
 ```bash
 pip install -r requirements-semantic.txt
 ```
 
-Without this extra, search uses only SQLite's own FTS5 lexical index — which
+Without this extra, search uses only SQLite's own FTS5 lexical index, which
 already ignores accents (`horario` finds `horário`). The extra does **not** pull
 in `torch`: it uses `model2vec` (`potion-multilingual-128M`), with distilled
 static embeddings. Tested on the 3 example queries from the original spec against
-a small index: plain FTS5 already gets all 3 on its own — the semantic gain from
+a small index: plain FTS5 already gets all 3 on its own. The semantic gain from
 `model2vec` should show up with divergent vocabulary and a larger index, but
 that's not what this project had to demonstrate. The real value of the extra is
 avoiding the cost of `torch` (~122 MB) while keeping the option open.
 
-### Interactive mode (optional — Phase 5)
+### Interactive mode (optional, Phase 5)
 
 ```ini
 MODE=interactive
 ```
 
 In this mode, **every** file passes through `_Inbox/_Aguardando/` before going to
-its final destination — the agent never moves anything on its own. Approval is
+its final destination. The agent never moves anything on its own. Approval is
 manual, via `inbox.py` (below).
 
 ---
@@ -165,10 +166,10 @@ instalar.bat
 
 Writes a plain `.bat` into the user's Startup folder (`shell:startup`), which
 starts the watcher via `pythonw.exe` (no window, no console) on the next login.
-**No Task Scheduler** — the same mechanism validated on EyeAgent after
+**No Task Scheduler**: the same mechanism validated on EyeAgent after
 `schtasks /sc onlogon` failed silently on a real machine (the task existed, but
 Windows reported "never ran at logon"). Also no PowerShell/COM, which another
-attempt showed can be blocked by antivirus — just `cmd`'s own `echo`, no external
+attempt showed can be blocked by antivirus. Just `cmd`'s own `echo`, no external
 dependency.
 
 `instalar.bat` validates `.env` before installing (it actually runs
@@ -179,7 +180,7 @@ from login:
 desinstalar.bat
 ```
 
-This only affects the next login — if the watcher is already running, it keeps
+This only affects the next login. If the watcher is already running, it keeps
 going until you log out or kill the `pythonw.exe` process manually.
 
 ### Search
@@ -195,12 +196,12 @@ Exits with 0 when it finds something and 1 when it doesn't.
 
 ```bash
 python inbox.py                          # list items pending approval
-python inbox.py --aprovar 3              # approve item 3 → move to destination
+python inbox.py --aprovar 3              # approve item 3, move to destination
 python inbox.py --rejeitar 3             # leave as is, drop from the list
 python inbox.py --aprovar-todos --acima 0.85   # batch-approve by confidence
 ```
 
-Approving reuses the same collision policy as the automatic flow — if the
+Approving reuses the same collision policy as the automatic flow: if the
 destination already exists, it becomes a duplicate or gets a suffix, never
 overwrites.
 
@@ -211,18 +212,19 @@ overwrites.
 1. **Static filter** (zero cost): `.crdownload`, `.part`, `~$...`, hidden files
    and directories are dropped without even entering the queue.
 2. **File ready?** Exclusive-handle probe via `CreateFileW` plus three
-   consecutive reads of size and mtime. Still being written → back to the queue.
-3. **System busy?** CPU > 70%, RAM > 80%, GPU > 35% or VRAM > 45% → the file
+   consecutive reads of size and mtime. Still being written means it goes back
+   to the queue.
+3. **System busy?** CPU > 70%, RAM > 80%, GPU > 35% or VRAM > 45%, then the file
    goes to `pendentes` with a retry in 2h and the process dies. GPU/VRAM are
-   deliberately more conservative than CPU/RAM: on a laptop GPU with shared
-   VRAM, a loaded `phi3:mini` used ~2–3 GB, and a high threshold leaves little
-   headroom — the LLM ends up competing for VRAM with games or editing instead
+   deliberately more conservative than CPU/RAM: on a laptop GPU with shared VRAM,
+   a loaded `phi3:mini` used about 2 to 3 GB, and a high threshold leaves little
+   headroom, so the LLM ends up competing for VRAM with games or editing instead
    of simply waiting its turn.
-4. **Classification by extension**, with confidence in `[0, 0.95]`:
-   `.exe` → 0.95, `.jpg` → 0.85, `.pdf` with no hint → 0.50,
-   `nota-fiscal-2026-05.pdf` → 0.85. This is the "90% rule".
-5. **Below `CONFIDENCE_MIN` (0.75)** → `_Inbox/`, with the original name
-   preserved and a human-readable reason.
+4. **Classification by extension**, with confidence in `[0, 0.95]`: `.exe` gives
+   0.95, `.jpg` 0.85, `.pdf` with no hint 0.50, `nota-fiscal-2026-05.pdf` 0.85.
+   This is the "90% rule".
+5. **Below `CONFIDENCE_MIN` (0.75)** the file goes to `_Inbox/`, with the
+   original name preserved and a human-readable reason.
 6. **Move with a write-ahead journal**: the intent goes to the database before
    any change on disk, the destination is reserved with `O_EXCL`, and only then
    does `os.replace` happen. Killing the agent mid-operation loses nothing and
@@ -236,7 +238,7 @@ overwrites.
   sha256 (and only with `ALLOW_CROSS_VOLUME=1`).
 - **Never overwrite.** A destination occupied by identical content becomes a
   duplicate in `_Inbox/_Duplicados/`; by different content, it gets a suffix
-  `-2`, `-3`, …
+  `-2`, `-3`, and so on.
 - **Never execute** the classified file. `.exe`, `.msi`, `.bat`, `.cmd` and
   `.ps1` are read only by name, extension and size.
 - `DRY_RUN=1` plans and logs everything without touching the user's disk.
