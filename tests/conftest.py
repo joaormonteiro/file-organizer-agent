@@ -133,7 +133,7 @@ class Sandbox:
 
     def caminho(self, categoria: str) -> Path:
         """Caminho completo de destino desta categoria, na raiz certa das 5."""
-        return rules.raiz_de(self.cfg, categoria) / Path(categoria)
+        return rules.caminho_destino(self.cfg, categoria)
 
 
 #: Valores padrão do sandbox. Thresholds em 100 para que o guard nunca considere

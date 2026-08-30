@@ -33,12 +33,14 @@ CAT_MATRIZES = "Documentos/Academico/UNIFESP/Matrizes-Curriculares"
 CAT_COMPROVANTES = "Documentos/Academico/UNIFESP/Comprovantes"
 CAT_TRABALHOS = "Documentos/Academico/UNIFESP/Trabalhos"
 CAT_HORARIOS = "Documentos/Academico/UNIFESP/Horarios"
+CAT_MATERIAL_AULA = "Documentos/Academico/UNIFESP/Material-de-Aula"
 CAT_CERTIFICADOS = "Documentos/Academico/Certificados"
 CAT_EYECONNECT = "Documentos/Profissional/Eyeconnect"
 CAT_EFFICIENCECO = "Documentos/Profissional/EfficienceCo"
 CAT_CONTRATOS = "Documentos/Profissional/Contratos"
 CAT_EXTRATOS = "Documentos/Financeiro/Extratos"
 CAT_NOTAS_FISCAIS = "Documentos/Financeiro/Notas-Fiscais"
+CAT_CONTROLE_FINANCEIRO = "Documentos/Financeiro/Controle-Financeiro"
 CAT_RG_CPF = "Documentos/Pessoal/Documentos-RG-CPF"
 CAT_OUTROS = "Documentos/Pessoal/Outros"
 CAT_INSTALADORES = "Softwares/Instaladores"
@@ -55,12 +57,14 @@ CATEGORIAS: tuple[str, ...] = (
     CAT_COMPROVANTES,
     CAT_TRABALHOS,
     CAT_HORARIOS,
+    CAT_MATERIAL_AULA,
     CAT_CERTIFICADOS,
     CAT_EYECONNECT,
     CAT_EFFICIENCECO,
     CAT_CONTRATOS,
     CAT_EXTRATOS,
     CAT_NOTAS_FISCAIS,
+    CAT_CONTROLE_FINANCEIRO,
     CAT_RG_CPF,
     CAT_OUTROS,
     CAT_INSTALADORES,
@@ -79,12 +83,14 @@ DESCRICOES: dict[str, str] = {
     CAT_COMPROVANTES: "comprovante de matricula, declaracao de vinculo com a faculdade",
     CAT_TRABALHOS: "TCC, monografia, relatorio ou trabalho entregue na faculdade",
     CAT_HORARIOS: "horario de aulas, dias e salas das disciplinas",
+    CAT_MATERIAL_AULA: "slide, lista de exercicios, apostila ou material de apoio de uma aula — nao e prova nem trabalho entregue, e material que o professor disponibiliza ou o aluno usa para estudar",
     CAT_CERTIFICADOS: "certificado ou diploma de conclusao de curso",
     CAT_EYECONNECT: "documento do cliente Eyeconnect ou do produto EyeAgent",
     CAT_EFFICIENCECO: "documento do cliente EfficienceCo",
     CAT_CONTRATOS: "contrato, termo de compromisso, aditivo contratual",
     CAT_EXTRATOS: "extrato bancario, fatura de cartao, boleto",
     CAT_NOTAS_FISCAIS: "nota fiscal, NF-e, NFS-e, DANFE",
+    CAT_CONTROLE_FINANCEIRO: "planilha pessoal de controle financeiro, orcamento, controle de gastos — nao e extrato de banco nem nota fiscal, e planilha que o proprio usuario mantem",
     CAT_RG_CPF: "RG, CPF, CNH, passaporte, documento de identidade",
     CAT_OUTROS: "qualquer outro documento pessoal que nao se encaixe acima",
     CAT_INSTALADORES: "instalador de programa",
@@ -288,8 +294,20 @@ KEYWORDS: tuple[GrupoKeyword, ...] = (
     GrupoKeyword("screenshot", ("screenshot", "captura de tela", "captura", "print"), CAT_SCREENSHOTS, frozenset({FAM_IMAGEM})),
     GrupoKeyword("nota-fiscal", ("nota fiscal", "nota-fiscal", "notafiscal", "nfe", "nfse", "danfe"), CAT_NOTAS_FISCAIS, _DOCS),
     GrupoKeyword("extrato", ("extrato", "fatura", "boleto"), CAT_EXTRATOS, _DOCS),
+    GrupoKeyword(
+        "controle-financeiro",
+        ("controle financeiro", "controle-financeiro", "orcamento", "controle de gastos", "financas"),
+        CAT_CONTROLE_FINANCEIRO,
+        _DOCS,
+    ),
     GrupoKeyword("matriz-curricular", ("matriz curricular", "matriz", "curricular", "grade curricular"), CAT_MATRIZES, _DOCS),
     GrupoKeyword("horario", ("horario", "horarios", "grade de horarios"), CAT_HORARIOS, _DOCS),
+    GrupoKeyword(
+        "material-de-aula",
+        ("aula", "aulas", "atividade", "exercicio", "exercicios", "apostila", "slide", "slides"),
+        CAT_MATERIAL_AULA,
+        _DOCS,
+    ),
     GrupoKeyword("comprovante", ("comprovante", "matricula"), CAT_COMPROVANTES, _DOCS),
     GrupoKeyword("trabalho", ("tcc", "monografia", "dissertacao", "relatorio de estagio"), CAT_TRABALHOS, _DOCS),
     GrupoKeyword("certificado", ("certificado", "diploma", "certificate"), CAT_CERTIFICADOS, _DOCS),
@@ -371,9 +389,26 @@ def campo_raiz(categoria: str) -> str:
     return RAIZ_POR_TOPO[topo]
 
 
-def raiz_de(cfg, categoria: str) -> Path:
-    """Qual das 5 raízes de destino recebe esta categoria."""
-    return getattr(cfg, campo_raiz(categoria))
+#: Segmentos de topo redundantes com o nome da própria raiz: `DOCUMENTS_ROOT`
+#: já É "Documentos" (só o nome no disco é em inglês — Explorer traduz na UI,
+#: é a mesma pasta), idem `PICTURES_ROOT`/"Imagens", `VIDEOS_ROOT`/"Videos" e
+#: `MUSIC_ROOT`/"Musica". Sem tirar o segmento, o destino virava
+#: `Documents\Documentos\...` — uma subpasta se chamando a mesma coisa que a
+#: pasta que já é. `Softwares` fica de fora de propósito: `DESKTOP_ROOT` não é
+#: sinônimo de "Softwares", então a subpasta continua útil lá (evita
+#: instalador solto direto na Área de Trabalho).
+_TOPOS_REDUNDANTES_COM_A_RAIZ = frozenset({"Documentos", "Imagens", "Videos", "Musica"})
+
+
+def caminho_destino(cfg, categoria: str) -> Path:
+    """Caminho final: raiz certa das 5 + subárvore da categoria, sem duplicar
+    o nome da raiz quando ele é redundante (`Documents\\Documentos\\...` vira
+    só `Documents\\...`)."""
+    partes = categoria.replace("\\", "/").strip("/").split("/")
+    raiz = getattr(cfg, campo_raiz(categoria))
+    if partes[0] in _TOPOS_REDUNDANTES_COM_A_RAIZ:
+        partes = partes[1:]
+    return raiz.joinpath(*partes) if partes else raiz
 
 
 # --------------------------------------------------------------------------- #
@@ -383,7 +418,7 @@ def raiz_de(cfg, categoria: str) -> Path:
 
 def pastas_da_arvore(cfg) -> list[Path]:
     """Lista, sem criar nada, todas as pastas que compõem a árvore de destino."""
-    pastas = [raiz_de(cfg, c) / Path(c) for c in CATEGORIAS]
+    pastas = [caminho_destino(cfg, c) for c in CATEGORIAS]
     pastas.extend([cfg.inbox_dir, cfg.duplicados_dir, cfg.aguardando_dir])
     return pastas
 

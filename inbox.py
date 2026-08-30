@@ -141,7 +141,7 @@ def _tabela(itens, cfg):
         tabela.add_row(
             str(operacao["id"]),
             Path(operacao["destino"]).name,
-            str(rules.raiz_de(cfg, categoria) / Path(categoria)),
+            str(rules.caminho_destino(cfg, categoria)),
             f"{float(operacao['confianca'] or 0):.2f}",
             operacao["erro"] or Motivo.AGUARDANDO_APROVACAO.value,
         )

@@ -112,12 +112,18 @@ def test_arvore_criada_sob_demanda(sandbox):
 
     As 5 raízes em si já existem (o sandbox as cria como pastas vazias, como
     Documents/Pictures/etc. já existem de fábrica no Windows) — o que não pode
-    existir antes da chamada é a subárvore de categorias dentro delas.
+    existir antes da chamada é a subárvore de categorias dentro delas. Exceção
+    óbvia: categorias de um segmento só (Videos, Musica) já SÃO a própria
+    raiz (`caminho_destino` tira o segmento redundante) — essas já existem
+    porque a raiz já existe, não têm subpasta própria para checar.
     """
     cfg = sandbox.cfg
     esperadas = rules.pastas_da_arvore(cfg)
     for categoria in rules.CATEGORIAS:
-        assert not sandbox.caminho(categoria).exists(), "listar as pastas não pode criar nada"
+        destino = sandbox.caminho(categoria)
+        if destino in cfg.raizes:
+            continue
+        assert not destino.exists(), "listar as pastas não pode criar nada"
 
     criadas = rules.criar_arvore(cfg)
     assert set(criadas) == set(esperadas)

@@ -41,6 +41,15 @@ def test_keyword_sem_ano():
     assert confianca == pytest.approx(0.80)
 
 
+def test_keyword_material_de_aula():
+    """`aula` classifica como Material-de-Aula em vez de cair em Outros
+    (0.60 + 0.20 = 0.80) — categoria adicionada porque PDFs de slide/lista de
+    exercicio nao tinham onde cair entre as 5 categorias academicas antigas."""
+    categoria, confianca, *_ = classify.classificar_por_extensao("aula-05-estruturas-repeticao.pdf")
+    assert categoria == rules.CAT_MATERIAL_AULA
+    assert confianca == pytest.approx(0.80)
+
+
 def test_keyword_muda_o_subtipo_dentro_da_familia():
     """`screenshot` leva um `.png` de Fotos para Screenshots e sobe a confiança."""
     categoria, confianca, *_ = classify.classificar_por_extensao("screenshot-2026-01.png")
