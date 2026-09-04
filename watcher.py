@@ -6,7 +6,7 @@ auditado pela RNF-03 (não pode importar dependências pesadas).
 Autostart real (pasta Inicializar) roda `pythonw.exe` sem console: uma
 exceção antes de `organizer.log` estar configurado (import, `config.get_config()`,
 `Watcher.__init__`) hoje desaparecia sem deixar rastro. `_registrar_crash` grava
-ao lado deste arquivo — não depende de `.env`, `%LOCALAPPDATA%` nem de nenhuma
+ao lado deste arquivo, sem depender de `.env`, `%LOCALAPPDATA%` nem de nenhuma
 raiz redirecionada pro OneDrive, então funciona mesmo se a própria config for a
 causa da falha.
 """
