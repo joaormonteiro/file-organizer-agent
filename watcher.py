@@ -13,12 +13,15 @@ causa da falha.
 
 from __future__ import annotations
 
+import os
 import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
 
-_CRASH_LOG = Path(__file__).resolve().parent / "crash.log"
+_RAIZ = Path(__file__).resolve().parent
+_CRASH_LOG = _RAIZ / "crash.log"
+_PID_FILE = _RAIZ / "watcher.pid"
 
 
 def _registrar_crash(exc: BaseException) -> None:
@@ -30,7 +33,19 @@ def _registrar_crash(exc: BaseException) -> None:
         pass  # nem isso pode derrubar o processo
 
 
+def _gravar_pid() -> None:
+    """`watcher.pid` ao lado deste arquivo: e como `supervisor.py` confirma que
+    o processo vivo com este PID e mesmo este watcher, sem depender do `wmic`
+    (removido em builds recentes do Windows) nem da linha de comando do processo.
+    """
+    try:
+        _PID_FILE.write_text(str(os.getpid()), encoding="ascii")
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
+    _gravar_pid()
     try:
         from organizer.watch import main
 

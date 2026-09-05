@@ -183,6 +183,38 @@ desinstalar.bat
 This only affects the next login. If the watcher is already running, it keeps
 going until you log out or kill the `pythonw.exe` process manually.
 
+### Keep it running (optional watchdog)
+
+The Startup-folder `.bat` above only fires once, at login. It does not help if
+the watcher dies mid-session — confirmed to happen for real on 2026-09-04,
+killed by Windows' own "Application Hang" detector during an unrelated system
+hiccup.
+
+```bash
+instalar_supervisor.bat
+```
+
+Registers a Task Scheduler task that runs `supervisor.py` every 5 minutes,
+indefinitely, and exits. It checks `watcher.pid` (written by `watcher.py` on
+startup) plus how stale `organizer.log` is; if the watcher is dead, or alive
+but silent for over 30 minutes, it restarts it.
+
+This *is* Task Scheduler, which the section above says was avoided for
+autostart — but a different trigger type. What failed on EyeAgent was
+`/sc onlogon` (fires once, tied to the login event, and silently didn't on one
+machine). This uses `/sc minute /mo 5`, a plain repeating timer with no
+dependency on catching the login moment; if one tick misfires, the next one
+five minutes later doesn't. It also runs and exits in under a couple of
+seconds, which is what keeps it out of reach of the same Application Hang
+class that killed the watcher — that detector only flags a process that stays
+*up* without responding for several seconds straight.
+
+```bash
+desinstalar_supervisor.bat
+```
+
+Removes the scheduled task only; the watcher itself, if running, is untouched.
+
 ### Search
 
 ```bash
